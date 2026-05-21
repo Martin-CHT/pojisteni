@@ -80,10 +80,13 @@
         },
         note: ''
     });
+    const DEFAULT_LOGO_URL = 'https://martin-cht.github.io/pojisteni/soubory/logo.png';
     function defaultState() {
         return { clients: [], currentContracts: [], proposedContracts: [],
                  loans: [], scenario: { person: '', pnDays: 90, hospDays: 5, injury: 'minor', retroactive: false },
-                 adviserBrief: '', advisorName: '', logoUrl: '' };
+                 adviserBrief: '',
+                 advisorName: getCookie('insurance_advisor_name') || '',
+                 logoUrl: getCookie('insurance_logo_url') || DEFAULT_LOGO_URL };
     }
 
     let state = defaultState();
@@ -96,6 +99,14 @@
                 /* Doplnění chybějících klíčů */
                 state = Object.assign(defaultState(), parsed);
                 state.scenario = Object.assign({ person: '', pnDays: 90, hospDays: 5, injury: 'minor', retroactive: false }, parsed.scenario || {});
+                /* Pokud stará data nemají logoUrl, nastavíme default. */
+                if (!state.logoUrl || !state.logoUrl.trim()) {
+                    state.logoUrl = getCookie('insurance_logo_url') || DEFAULT_LOGO_URL;
+                }
+                /* Pokud stará data nemají advisorName, ale je v cookies, načteme. */
+                if (!state.advisorName || !state.advisorName.trim()) {
+                    state.advisorName = getCookie('insurance_advisor_name') || '';
+                }
                 /* Doplnění items pro starší smlouvy */
                 ['currentContracts','proposedContracts'].forEach(k => {
                     (state[k] || []).forEach(c => {
@@ -1337,9 +1348,16 @@ ${input}` }
         const an = document.getElementById('setAdvisorName');
         const lu = document.getElementById('setLogoUrl');
         state.advisorName = an ? an.value.trim() : '';
-        state.logoUrl = lu ? lu.value.trim() : '';
+        // Pokud user vymaže URL, vrátíme se k defaultu; jinak respektujeme jeho hodnotu.
+        const luVal = lu ? lu.value.trim() : '';
+        state.logoUrl = luVal || DEFAULT_LOGO_URL;
+        // Cookie zálohy (pojistka proti smazání localStorage)
+        setCookie('insurance_logo_url', state.logoUrl, 365);
+        setCookie('insurance_advisor_name', state.advisorName, 365);
         save();
         refreshLogoPreview();
+        // Pokud uživatel vymazal pole, hned mu tam ukážeme default zpátky
+        if (lu && !luVal) lu.value = state.logoUrl;
     }
     function refreshLogoPreview() {
         const wrap = document.getElementById('logoPreview');
@@ -1373,10 +1391,25 @@ ${input}` }
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'srovnani-pojisteni-' + new Date().toISOString().slice(0,10) + '.json';
+        a.download = buildExportFilename();
         a.click();
         URL.revokeObjectURL(url);
         toast('Export hotov', 'success');
+    }
+
+    /* Jméno souboru ve formátu „YYYY-MM-DD Jméno.json".
+       Jméno = hlavní klient (první v seznamu). Sanitizujeme znaky nepřípustné
+       ve Windows / macOS / Linux souborových názvech. */
+    function buildExportFilename() {
+        const date = new Date().toISOString().slice(0,10);
+        let name = '';
+        if (Array.isArray(state.clients) && state.clients.length > 0) {
+            name = (state.clients[0].name || '').trim();
+        }
+        // Sanitize — zakázané znaky ve filenamu: \ / : * ? " < > |
+        name = name.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
+        if (!name) return date + ' Portfolio.json';
+        return date + ' ' + name + '.json';
     }
     function importData(ev) {
         const file = ev.target.files[0];

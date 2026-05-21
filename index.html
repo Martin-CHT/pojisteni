@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Srovnání pojištění – nástroj pro investičního poradce">
+    <title>Srovnání pojištění | Insurance Terminal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="Soubory/style.css">
+    <meta name="fc-module" content="insurance">
+    <meta name="fc-storage-key" content="insurance_compare_data">
+</head>
+<body class="antialiased pb-16">
+
+    <!-- ══════════════ NAVBAR ══════════════ -->
+    <header class="navbar">
+        <div class="max-w-[1700px] mx-auto px-4 lg:px-6 h-14 flex items-center justify-between gap-4">
+            <div class="flex items-center gap-2.5 shrink-0">
+                <div class="w-7 h-7 rounded bg-sky-500/10 border border-sky-500/30 flex items-center justify-center">
+                    <i data-lucide="shield-check" class="w-3.5 h-3.5 text-sky-400"></i>
+                </div>
+                <div class="leading-tight">
+                    <span class="font-semibold text-slate-100 text-sm tracking-tight">Insurance</span>
+                    <span class="font-semibold text-sky-400 text-sm tracking-tight"> Terminal</span>
+                    <div class="text-[10px] text-slate-500 font-mono">Srovnání pojištění · v2026</div>
+                </div>
+                <span class="hidden md:block text-slate-700 text-xs font-mono ml-2">// Klient → Stávající ↔ Návrh</span>
+            </div>
+
+            <div id="topStats" class="hidden lg:flex items-center gap-2 text-[10px] font-mono">
+                <span class="px-2 py-1 rounded bg-slate-900/60 border border-slate-800">
+                    <span class="text-slate-500">Klienti:</span>
+                    <span id="navClients" class="text-slate-200 ml-1">0</span>
+                </span>
+                <span class="px-2 py-1 rounded bg-slate-900/60 border border-slate-800">
+                    <span class="text-slate-500">Stáv. smluv:</span>
+                    <span id="navCurrentCount" class="text-emerald-300 ml-1">0</span>
+                </span>
+                <span class="px-2 py-1 rounded bg-slate-900/60 border border-slate-800">
+                    <span class="text-slate-500">Návrh smluv:</span>
+                    <span id="navProposedCount" class="text-sky-300 ml-1">0</span>
+                </span>
+                <span class="px-2 py-1 rounded bg-slate-900/60 border border-slate-800">
+                    <span class="text-slate-500">Δ měs:</span>
+                    <span id="navDiff" class="text-amber-300 ml-1">0 Kč</span>
+                </span>
+            </div>
+
+            <div class="flex items-center gap-2">
+                <button onclick="app.openPrint()" class="btn-secondary" title="Otevřít tiskovou verzi pro klienta">
+                    <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+                    <span class="hidden sm:inline">Tisk</span>
+                </button>
+                <button onclick="app.exportData()" class="btn-secondary">
+                    <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                    <span class="hidden sm:inline">Export</span>
+                </button>
+                <label class="btn-secondary cursor-pointer">
+                    <i data-lucide="upload" class="w-3.5 h-3.5"></i>
+                    <span class="hidden sm:inline">Import</span>
+                    <input type="file" class="hidden" accept=".json" onchange="app.importData(event)">
+                </label>
+                <button onclick="app.openAiPanel()" class="btn-ai" title="Spustí AI analýzu portfolia (Groq)">
+                    <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+                    <span class="hidden sm:inline">AI</span>
+                </button>
+                <button onclick="app.resetData()" class="btn-danger" title="Reset všech dat (s potvrzením)">
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- TAB BAR -->
+        <div class="border-t border-slate-800/60">
+            <div class="max-w-[1700px] mx-auto px-4 lg:px-6 flex items-center gap-1 overflow-x-auto">
+                <button class="tab-btn tab-active" data-tab="klient">
+                    <i data-lucide="users" class="w-3.5 h-3.5"></i>Klient & Rodina
+                </button>
+                <button class="tab-btn" data-tab="stavajici">
+                    <i data-lucide="file-text" class="w-3.5 h-3.5"></i>Stávající smlouvy
+                </button>
+                <button class="tab-btn" data-tab="navrh">
+                    <i data-lucide="file-plus-2" class="w-3.5 h-3.5"></i>Návrh smluv
+                </button>
+                <button class="tab-btn" data-tab="uvery">
+                    <i data-lucide="banknote" class="w-3.5 h-3.5"></i>Závazky & Úvěry
+                </button>
+                <button class="tab-btn" data-tab="scenar">
+                    <i data-lucide="activity" class="w-3.5 h-3.5"></i>Scénáře plnění
+                </button>
+                <button class="tab-btn" data-tab="srovnani">
+                    <i data-lucide="git-compare" class="w-3.5 h-3.5"></i>Srovnání
+                </button>
+                <button class="tab-btn" data-tab="ai">
+                    <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>AI analýza
+                </button>
+                <button class="tab-btn" data-tab="pravo">
+                    <i data-lucide="scale" class="w-3.5 h-3.5"></i>Právní rámec
+                </button>
+                <button class="tab-btn" data-tab="nastaveni">
+                    <i data-lucide="settings" class="w-3.5 h-3.5"></i>Nastavení
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-[1700px] mx-auto px-3 lg:px-4 py-3 space-y-3">
+
+        <!-- ════════════ KPI STRIP ════════════ -->
+        <section class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+            <div class="stat-card border-t-2 border-t-emerald-500">
+                <div class="stat-label flex items-center gap-1.5">
+                    <i data-lucide="file-text" class="w-3 h-3"></i>Stáv. roční náklad
+                </div>
+                <div class="stat-value text-emerald-300" id="kpiCurrentYearly">0 Kč</div>
+                <div class="stat-sub" id="kpiCurrentMonthly">0 Kč / měs</div>
+            </div>
+            <div class="stat-card border-t-2 border-t-sky-500">
+                <div class="stat-label flex items-center gap-1.5">
+                    <i data-lucide="file-plus-2" class="w-3 h-3"></i>Navrh. roční náklad
+                </div>
+                <div class="stat-value text-sky-300" id="kpiProposedYearly">0 Kč</div>
+                <div class="stat-sub" id="kpiProposedMonthly">0 Kč / měs</div>
+            </div>
+            <div class="stat-card border-t-2 border-t-amber-500">
+                <div class="stat-label flex items-center gap-1.5">
+                    <i data-lucide="trending-up" class="w-3 h-3"></i>Rozdíl měsíčně
+                </div>
+                <div class="stat-value" id="kpiDiffMonthly">0 Kč</div>
+                <div class="stat-sub" id="kpiDiffPct">±0 %</div>
+            </div>
+            <div class="stat-card border-t-2 border-t-rose-500">
+                <div class="stat-label flex items-center gap-1.5">
+                    <i data-lucide="alert-triangle" class="w-3 h-3"></i>Podpojištěno (smrt)
+                </div>
+                <div class="stat-value text-rose-300" id="kpiUnderinsured">0 Kč</div>
+                <div class="stat-sub" id="kpiUnderinsuredLabel">Krytí vs. závazky</div>
+            </div>
+            <div class="stat-card border-t-2 border-t-violet-500">
+                <div class="stat-label flex items-center gap-1.5">
+                    <i data-lucide="layers" class="w-3 h-3"></i>Pokryté kategorie
+                </div>
+                <div class="stat-value" id="kpiCategoriesCovered">0/13</div>
+                <div class="stat-sub" id="kpiCategoriesCoveredLabel">stáv. vs. návrh</div>
+            </div>
+            <div class="stat-card border-t-2 border-t-fuchsia-500">
+                <div class="stat-label flex items-center gap-1.5">
+                    <i data-lucide="users" class="w-3 h-3"></i>Klientů & smluv
+                </div>
+                <div class="stat-value" id="kpiClientCount">0</div>
+                <div class="stat-sub" id="kpiContractCount">0 smluv celkem</div>
+            </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 1: KLIENT & RODINA
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-klient" class="tab-pane">
+            <div class="panel p-5">
+                <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                    <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                        <i data-lucide="user" class="w-4 h-4 text-sky-400"></i>
+                        Klient a rodinní příslušníci
+                    </h2>
+                    <button onclick="app.addClient()" class="btn-primary">
+                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat osobu
+                    </button>
+                </div>
+                <p class="text-xs text-slate-500 mb-4">
+                    Zadejte všechny pojištěné osoby v rodině. Každá osoba má vlastní hrubý příjem a může mít více smluv u různých pojišťoven.
+                </p>
+                <div id="clientsList" class="space-y-3"></div>
+            </div>
+
+            <div class="panel p-5 mt-3">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
+                    <i data-lucide="info" class="w-4 h-4 text-amber-400"></i>
+                    Zadání / poznámka poradce
+                </h2>
+                <textarea id="adviserBrief" rows="4" class="pro-input font-mono text-xs"
+                    placeholder="Pokud platíme cca 2 200 Kč dnes a nejsme kryti na úvěry, jsme ochotni platit max. o 2-3 000 měsíčně navíc. Chceme být ale krytí na nový úvěr ve výši cca 5 000 000 (hypotéka a úvěr od rodičů), zároveň na stávající úvěr, krytí vážných úrazů, pracovní neschopnosti, dlouhodobé ztráty příjmů. Pokud možno nesahat na smlouvy, kde je pán pojištěn na vážná rizika před rokem 2021 z důvodů problémů se srdcem."
+                    oninput="app.saveAdviserBrief()"></textarea>
+            </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 2: STÁVAJÍCÍ SMLOUVY
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-stavajici" class="tab-pane hidden">
+            <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                        <i data-lucide="file-text" class="w-4 h-4 text-emerald-400"></i>
+                        Stávající portfolio pojištění
+                    </h2>
+                    <p class="text-xs text-slate-500 mt-1">Aktuálně sjednané smlouvy klienta a rodinných příslušníků</p>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <button onclick="app.addContract('current')" class="btn-primary">
+                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat smlouvu
+                    </button>
+                    <button onclick="app.bulkImport('current')" class="btn-secondary" title="Hromadný vstup z textu (LLM-friendly)">
+                        <i data-lucide="file-input" class="w-3.5 h-3.5"></i>Hromadný vstup
+                    </button>
+                </div>
+            </div>
+            <div id="currentContractsContainer" class="space-y-3"></div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 3: NÁVRH SMLUV
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-navrh" class="tab-pane hidden">
+            <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                        <i data-lucide="file-plus-2" class="w-4 h-4 text-sky-400"></i>
+                        Návrh nového portfolia
+                    </h2>
+                    <p class="text-xs text-slate-500 mt-1">Navrhované změny – nové smlouvy, úpravy nebo zachované smlouvy</p>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <button onclick="app.copyFromCurrent()" class="btn-secondary" title="Zkopíruje všechny stávající smlouvy do návrhu">
+                        <i data-lucide="copy" class="w-3.5 h-3.5"></i>Kopie ze stávajícího
+                    </button>
+                    <button onclick="app.addContract('proposed')" class="btn-primary">
+                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat smlouvu
+                    </button>
+                    <button onclick="app.bulkImport('proposed')" class="btn-secondary">
+                        <i data-lucide="file-input" class="w-3.5 h-3.5"></i>Hromadný vstup
+                    </button>
+                </div>
+            </div>
+            <div id="proposedContractsContainer" class="space-y-3"></div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 4: ÚVĚRY & ZÁVAZKY
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-uvery" class="tab-pane hidden">
+            <div class="panel p-5">
+                <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                    <div>
+                        <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                            <i data-lucide="banknote" class="w-4 h-4 text-rose-400"></i>
+                            Úvěry a finanční závazky
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-1">Hypotéky, spotřebitelské úvěry, půjčky od rodiny – vstup pro výpočet potřebného krytí smrti</p>
+                    </div>
+                    <button onclick="app.addLoan()" class="btn-primary">
+                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat úvěr
+                    </button>
+                </div>
+                <div id="loansList" class="space-y-2"></div>
+
+                <div class="mt-5 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div class="kpi-card">
+                        <div class="text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Celková výše závazků</div>
+                        <div class="text-2xl font-bold font-mono text-rose-300" id="loansTotal">0 Kč</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Doporučené krytí smrti (≥ závazky)</div>
+                        <div class="text-2xl font-bold font-mono text-sky-300" id="loansRecommended">0 Kč</div>
+                        <div class="text-[10px] text-slate-500 mt-1">+15 % doporučená rezerva pro pozůstalé</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 5: SCÉNÁŘE PLNĚNÍ
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-scenar" class="tab-pane hidden">
+            <div class="panel p-5">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-2">
+                    <i data-lucide="activity" class="w-4 h-4 text-violet-400"></i>
+                    Modelový scénář pojistného plnění
+                </h2>
+                <p class="text-xs text-slate-500 mb-4">
+                    Simulace: pán si zlomí nohu, je 90 dní v PN, 5 dní hospitalizován a podstoupí chirurgický zákrok.
+                    Pro každou osobu vidíte, kolik by dostala ze stávajícího × návrhu.
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Osoba</span>
+                        <select id="scenarioPerson" class="pro-input" onchange="app.renderScenario()"></select>
+                    </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Dní PN</span>
+                        <input type="number" id="scenarioPnDays" value="90" class="pro-input" oninput="app.renderScenario()">
+                    </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Dní hospitalizace</span>
+                        <input type="number" id="scenarioHospDays" value="5" class="pro-input" oninput="app.renderScenario()">
+                    </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Charakter úrazu</span>
+                        <select id="scenarioInjury" class="pro-input" onchange="app.renderScenario()">
+                            <option value="minor">Drobný úraz (denní dávka)</option>
+                            <option value="major">Vážný úraz (vyšší denní dávka)</option>
+                            <option value="both">Drobný + Vážný</option>
+                        </select>
+                    </label>
+                </div>
+                <label class="inline-flex items-center gap-2 text-xs text-slate-300 mb-4">
+                    <input type="checkbox" id="scenarioRetroactive" class="pro-input" onchange="app.renderScenario()" style="width:1rem;height:1rem;">
+                    Plnění PN <strong>od 1. dne zpětně</strong> (rozšířená klauzule – platí pouze pokud má smlouva sjednanou)
+                </label>
+                <div id="scenarioResult"></div>
+            </div>
+
+            <div class="panel p-5 mt-3">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-2">
+                    <i data-lucide="wallet" class="w-4 h-4 text-amber-400"></i>
+                    Pokrytí měsíčního výpadku příjmu (zaměstnanec vs. OSVČ)
+                </h2>
+                <p class="text-xs text-slate-500 mb-4">
+                    Modelový výpočet měsíčního příjmu v PN: zaměstnanec čerpá nemocenskou ČSSZ (cca % z hrubé mzdy dle pásem, max. 48 000) + denní dávky z pojistek; OSVČ ČSSZ čerpá jen pokud si platí (zde počítáme bez ní) + denní dávky.
+                </p>
+                <div id="incomeCoverage"></div>
+            </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 6: SROVNÁNÍ
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-srovnani" class="tab-pane hidden">
+            <div class="panel p-5">
+                <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                    <div>
+                        <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                            <i data-lucide="git-compare" class="w-4 h-4 text-amber-400"></i>
+                            Detailní srovnání stávajícího × navrhovaného
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-1">Položka po položce – přepojištění, podpojištění, duplicity, nuance podmínek</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <label class="text-[10px] text-slate-400 font-mono">Osoba:</label>
+                        <select id="compareFilter" class="pro-input text-xs" style="width:auto" onchange="app.renderComparison()">
+                            <option value="ALL">Souhrn – všichni</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="comparisonContent"></div>
+            </div>
+
+            <div class="panel p-5 mt-3">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
+                    <i data-lucide="alert-octagon" class="w-4 h-4 text-rose-400"></i>
+                    Upozornění a doporučení
+                </h2>
+                <div id="recommendationsList" class="space-y-2"></div>
+            </div>
+
+            <div class="panel p-5 mt-3">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
+                    <i data-lucide="bar-chart-3" class="w-4 h-4 text-sky-400"></i>
+                    Vizualizace pokrytí dle kategorií
+                </h2>
+                <div class="relative h-80">
+                    <canvas id="categoryChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 7: AI ANALÝZA
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-ai" class="tab-pane hidden">
+            <div class="panel p-5 ai-panel">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-2">
+                    <i data-lucide="sparkles" class="w-4 h-4"></i>
+                    AI vyhodnocení portfolia (Groq)
+                </h2>
+                <p class="text-xs text-slate-400 mb-4">
+                    AI dostává kompletní portfolio (klienti, závazky, stávající a navrhované smlouvy) a posuzuje:
+                    duplicitní krytí, podpojištění, smysl změny, nuance podmínek. Klíč nastavte v záložce Nastavení (sdílený s Finance Terminalem).
+                </p>
+
+                <div class="grid grid-cols-1 lg:grid-cols-4 gap-3 mb-4">
+                    <select id="aiTaskType" class="pro-input text-xs lg:col-span-1">
+                        <option value="overall">Celkové vyhodnocení portfolia</option>
+                        <option value="underinsurance">Podpojištění / přepojištění</option>
+                        <option value="conditions">Analýza podmínek smluv</option>
+                        <option value="cost">Cost-benefit – stáv. vs návrh</option>
+                        <option value="legal">Soulad se zákonem o pojišťovnictví</option>
+                        <option value="custom">Vlastní dotaz</option>
+                    </select>
+                    <input type="text" id="aiCustomQuestion" class="pro-input text-xs lg:col-span-2 hidden" placeholder="Co konkrétně chcete od AI?">
+                    <button onclick="app.runAiAnalysis()" class="btn-ai" id="aiRunBtn">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>Spustit analýzu
+                    </button>
+                </div>
+
+                <div id="aiOutput" class="bg-slate-950/60 border border-slate-800 rounded p-4 text-sm text-slate-300 leading-relaxed min-h-[200px]">
+                    <div class="text-slate-500 italic">Výstup AI se zobrazí zde…</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 8: PRÁVNÍ RÁMEC
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-pravo" class="tab-pane hidden">
+            <div class="panel p-5">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
+                    <i data-lucide="scale" class="w-4 h-4 text-amber-400"></i>
+                    Právní rámec & obchodní podmínky největších českých pojišťoven
+                </h2>
+                <p class="text-xs text-slate-500 mb-4">
+                    Stručný přehled legislativy (zákon č. 277/2009 Sb. + č. 170/2018 Sb.) a praxe Kooperativy, Allianz, Generali ČP, ČSOB pojišťovny, NN, Uniqa.
+                    Informativní – pro konkrétní smlouvy vždy konzultujte aktuální OP dané pojišťovny.
+                </p>
+                <div id="legalContent"></div>
+            </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 9: NASTAVENÍ
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-nastaveni" class="tab-pane hidden">
+            <div class="panel p-5">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
+                    <i data-lucide="settings" class="w-4 h-4 text-sky-400"></i>
+                    Nastavení aplikace
+                </h2>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div class="lg:col-span-2 panel p-4" style="background:#0b1426;border-color:#1e3a5f">
+                        <h3 class="text-xs font-bold uppercase text-sky-300 mb-2 flex items-center gap-2">
+                            <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+                            Tisková sestava — branding poradce
+                        </h3>
+                        <p class="text-[11px] text-slate-500 mb-3">Hodnoty se použijí v hlavičce a podpisu tiskové sestavy (Soubory/tisk.html).</p>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Jméno poradce</label>
+                                <input type="text" id="setAdvisorName" class="pro-input text-xs" placeholder="např. Jan Novák, MBA"
+                                    oninput="app.savePrintBranding()">
+                                <p class="text-[10px] text-slate-500 mt-1">Zobrazí se jako „Připravil: …" v hlavičce a v podpisovém řádku. Při prázdné hodnotě se použije „investiční poradce".</p>
+                            </div>
+                            <div>
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">URL loga (přímý odkaz na obrázek)</label>
+                                <input type="url" id="setLogoUrl" class="pro-input font-mono text-[11px]"
+                                    placeholder="https://martin-cht.github.io/pojisteni/soubory/logo.png"
+                                    oninput="app.savePrintBranding()">
+                                <div class="text-[10px] text-slate-500 mt-1 leading-relaxed">
+                                    <strong class="text-emerald-300">Výchozí logo</strong> je již nastavené – pole můžete nechat prázdné a použije se automaticky.
+                                    Pokud chcete <strong>vlastní logo</strong>:<br>
+                                    1. Otevřete GitHub repozitář a v něm složku <code class="text-sky-300">Soubory/</code>.<br>
+                                    2. <em>Add file → Upload files</em> a nahrajte PNG/JPG/SVG.<br>
+                                    3. Klikněte na nahraný obrázek a poté na tlačítko <strong>Raw</strong>.<br>
+                                    4. Zkopírujte adresu z prohlížeče (začíná <code class="text-sky-300">https://raw.githubusercontent.com/…</code>) a vložte sem.<br>
+                                    <strong class="text-amber-400">Velikost neřešit</strong> – v sestavě se logo automaticky zmenší (max. 180×48 px, ~13 mm na tisku).
+                                </div>
+                            </div>
+                        </div>
+                        <div id="logoPreview" class="mt-3 hidden">
+                            <div class="text-[10px] uppercase text-slate-400 font-bold mb-1">Náhled loga:</div>
+                            <div class="inline-block bg-white p-2 rounded border border-slate-700">
+                                <img id="logoPreviewImg" alt="Náhled loga" style="max-height:48px;max-width:180px;display:block">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Groq API klíč</h3>
+                        <p class="text-xs text-slate-500 mb-2">Sdílený s ostatními moduly Finance Terminal (groq_api_key v localStorage / cookie).</p>
+                        <div class="flex gap-2">
+                            <input type="password" id="setGroqKey" class="pro-input font-mono text-xs" placeholder="gsk_...">
+                            <button onclick="app.saveSettings()" class="btn-primary">Uložit</button>
+                        </div>
+                        <div class="text-[10px] text-slate-500 mt-1">
+                            Klíč získáte zdarma na <a href="https://console.groq.com/keys" target="_blank" rel="noopener" class="text-sky-400 hover:underline">console.groq.com/keys</a>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Model AI</h3>
+                        <select id="setGroqModel" class="pro-input" onchange="app.saveSettings()">
+                            <option value="llama-3.3-70b-versatile">Llama 3.3 70B (přesnější, pomalejší)</option>
+                            <option value="llama-3.1-8b-instant">Llama 3.1 8B (rychlejší)</option>
+                            <option value="mixtral-8x7b-32768">Mixtral 8x7B (32k kontext)</option>
+                            <option value="gemma2-9b-it">Gemma 2 9B</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Nemocenská — sazba pásem</h3>
+                        <p class="text-[11px] text-slate-500 mb-2">Výchozí sazby ČSSZ 2024 (% redukované hrubé mzdy). V Excel byly tyto hodnoty: 64/60/56/52/48/45/43/41/36 %.</p>
+                        <div class="grid grid-cols-3 gap-1 text-[11px]">
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">1-49k: 64 %</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">50-59k: 60 %</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">60-69k: 56 %</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">70-79k: 52 %</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">80-89k: 48 %</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">90-99k: 45 %</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">100-109k: 43 %</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">110-119k: 41 %</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">120k+: 36 %</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Téma</h3>
+                        <div class="flex gap-2">
+                            <button onclick="app.setTheme('dark')" class="btn-secondary">
+                                <i data-lucide="moon" class="w-3.5 h-3.5"></i>Tmavé
+                            </button>
+                            <button onclick="app.setTheme('light')" class="btn-secondary">
+                                <i data-lucide="sun" class="w-3.5 h-3.5"></i>Světlé
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="lg:col-span-2">
+                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Datový sklad</h3>
+                        <p class="text-[11px] text-slate-500 mb-2">Veškerá data jsou uložena pouze ve vašem prohlížeči (localStorage). Pro přenos mezi zařízeními použijte Export → Import JSON.</p>
+                        <div class="code-block text-[11px]" id="storagePreview">{ …data… }</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ════════════════════════════════════════════════════════════
+         MODAL: Smlouva (přidat / editovat)
+         ════════════════════════════════════════════════════════════ -->
+    <div id="contractModal" class="modal-overlay fixed inset-0 hidden items-center justify-center p-4 z-50">
+        <div class="panel max-w-5xl w-full max-h-[90vh] overflow-y-auto p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-slate-100 flex items-center gap-2">
+                    <i data-lucide="file-edit" class="w-4 h-4 text-sky-400"></i>
+                    <span id="contractModalTitle">Nová smlouva</span>
+                </h3>
+                <button onclick="app.closeContractModal()" class="text-slate-500 hover:text-slate-300">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <div id="contractModalBody"></div>
+        </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════
+         MODAL: Hromadný vstup
+         ════════════════════════════════════════════════════════════ -->
+    <div id="bulkModal" class="modal-overlay fixed inset-0 hidden items-center justify-center p-4 z-50">
+        <div class="panel max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-base font-semibold text-slate-100 flex items-center gap-2">
+                    <i data-lucide="file-input" class="w-4 h-4 text-sky-400"></i>
+                    Hromadný vstup smluv
+                </h3>
+                <button onclick="app.closeBulkModal()" class="text-slate-500 hover:text-slate-300">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <p class="text-xs text-slate-500 mb-3">
+                Vložte text z e-mailu / PDF nabídky pojišťovny. AI (Groq) ho rozparsuje na strukturované smlouvy.
+                Vyžaduje nastavený Groq API klíč.
+            </p>
+            <textarea id="bulkInput" rows="12" class="pro-input font-mono text-xs"
+                placeholder="Příklad:&#10;Kooperativa, smlouva 1420482462, pojistné 500 Kč/měs&#10;- smrt 200 000&#10;- invalidita 24 000&#10;- závažné onemocnění 50 000&#10;- TN úrazu 200 000&#10;- denní dávka úraz 100 Kč&#10;- hospitalizace 200 Kč&#10;- platnost 2009–2050"></textarea>
+            <div class="flex justify-end gap-2 mt-3">
+                <button onclick="app.closeBulkModal()" class="btn-secondary">Zrušit</button>
+                <button onclick="app.runBulkParse()" class="btn-ai" id="bulkParseBtn">
+                    <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>Parsovat přes AI
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════
+         TOAST NOTIFICATIONS
+         ════════════════════════════════════════════════════════════ -->
+    <div id="toastContainer" class="fixed bottom-5 right-5 space-y-2 z-[100]"></div>
+
+    <script src="Soubory/insurance-data.js"></script>
+    <script src="Soubory/insurance-app.js"></script>
+</body>
+</html>
