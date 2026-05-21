@@ -1448,7 +1448,7 @@ ${input}` }
     /* ════════════ PRINT ════════════ */
     function openPrint() {
         save();
-        window.open('Soubory/tisk.html', '_blank');
+        window.open('soubory/tisk.html', '_blank');
     }
 
     /* ════════════ MASTER RENDER ════════════ */

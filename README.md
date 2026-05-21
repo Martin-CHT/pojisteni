@@ -26,7 +26,7 @@ Veškerá data jsou ukládána pouze do `localStorage` Vašeho prohlížeče (kl
 srovnání pojištění/
 ├── index.html               ← hlavní aplikace (vstupní bod)
 ├── README.md                ← tento soubor
-└── Soubory/
+└── soubory/                ← složka s ostatními soubory (POZOR: malé "s" — GitHub Pages je case-sensitive)
     ├── style.css            ← design v duchu Finance Terminalu (tmavé/světlé téma)
     ├── insurance-data.js    ← pojistné kategorie, sazby ČSSZ, pojišťovny, právní rámec, ukázková data
     ├── insurance-app.js     ← hlavní aplikační logika
@@ -39,7 +39,7 @@ srovnání pojištění/
 |--------------------------------|-------------------------------------------------|
 | `List0` (rodina Hozna)         | Klienti + Stávající smlouvy + Návrh + Úvěry     |
 | `Návrh` (abstrahovaný klient)  | Stejný datový model, jen bez napevno vázané rodiny |
-| `Součty - k tisku`             | `Soubory/tisk.html` (5 stran A4)                |
+| `Součty - k tisku`             | `soubory/tisk.html` (5 stran A4)                |
 | `Tabulka1` (existing)          | `state.currentContracts`                        |
 | `Tabulka2` (proposed)          | `state.proposedContracts`                       |
 | Vzorce `SUMIF` po klientech    | Funkce `sumItemFor()` v `insurance-app.js`      |
@@ -89,7 +89,7 @@ AI dostává **kompletní portfolio jako strukturovaný JSON** a kontext zadán�
 
 ## Tiskový výstup
 
-Tlačítko **Tisk** v hlavičce otevře `Soubory/tisk.html` v novém okně — 5stránková A4 sestava:
+Tlačítko **Tisk** v hlavičce otevře `soubory/tisk.html` v novém okně — 5stránková A4 sestava:
 
 1. **Titulní strana** — souhrn KPI, závazky, pojištěné osoby, zadání poradce.
 2. **Stávající portfolio** — přehled všech smluv po osobách.
