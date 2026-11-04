@@ -1,23 +1,12 @@
 /* ════════════════════════════════════════════════════════════════════
    insurance-app.js
-   Hlavní logika aplikace „Srovnání pojištění".
-
-   Datový model (localStorage klíč: 'insurance_compare_data'):
-   {
-     clients:           [ { id, name, incomeGross, isEntrepreneur, birthYear } ],
-     currentContracts:  [ Contract ],
-     proposedContracts: [ Contract ],
-     loans:             [ { id, name, amount, linkedClientId } ],
-     scenario:          { person, pnDays, hospDays, injury, retroactive },
-     adviserBrief:      string
-   }
-   Contract = {
-     id, clientId, insurer, contractNo, start, end, premium,
-     items: { smrt, smrtUraz, invalidita, zavOn, tnUraz, tnUraz10,
-              uraz, urazVelky, hosp, hospUraz, pn28, pn61, chir },
-     conditions: { pnWaitingDays, pnRetroactive, hospWaitingDays, ... },
-     note
-   }
+   Hlavní aplikační logika „Insurance Terminal v2026"
+   - 32 pojistných kategorií v 6 skupinách rizik
+   - Rozhodovací štítky smluv (PONECHAT / UPRAVIT / VYPOVĚDĚT / SLOUČIT / NOVÁ)
+   - Kalkulačka potřebného krytí (Needs & Gap Engine dle ČSSZ 2026)
+   - Simulátor progrese trvalých následků úrazu (100 % až 1000 %)
+   - Index kvality zajištění (Health Score 0–100 %) & Radarový profil 5 pilířů
+   - Daňový a benefitní kalkulátor (limit 48 000 Kč / 50 000 Kč)
    ════════════════════════════════════════════════════════════════════ */
 
 (function () {
@@ -31,25 +20,39 @@
     function clone(o)     { return JSON.parse(JSON.stringify(o)); }
     function num(v)       { v = parseFloat(v); return isNaN(v) ? 0 : v; }
     function fmtCZK(n) {
-        n = num(n);
+        n = Math.round(num(n));
         return n.toLocaleString('cs-CZ', { maximumFractionDigits: 0 }) + ' Kč';
     }
     function fmtCZKShort(n) {
         n = num(n);
-        if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(2).replace(/\.?0+$/, '') + ' mil. Kč';
-        if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(0) + ' tis. Kč';
-        return n.toFixed(0) + ' Kč';
+        if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + ' mil.';
+        if (Math.abs(n) >= 1e3) return Math.round(n / 1e3) + ' tis.';
+        return Math.round(n) + '';
     }
-    function fmtPct(n) { return (n*100).toFixed(0) + ' %'; }
+    function fmtCatValue(v, cat) {
+        v = num(v);
+        if (!v) return '—';
+        if (cat.kind === 'daily') return v.toLocaleString('cs-CZ') + ' Kč/d';
+        if (cat.kind === 'monthly') return v.toLocaleString('cs-CZ') + ' Kč/m';
+        return fmtCZK(v);
+    }
+    function fmtCatShort(v, cat) {
+        v = num(v);
+        if (!v) return '·';
+        if (cat.kind === 'daily') return v + '/d';
+        if (cat.kind === 'monthly') return fmtCZKShort(v) + '/m';
+        return fmtCZKShort(v);
+    }
     function escapeHtml(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g,
-            c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+            c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
     function toast(msg, type) {
         const div = document.createElement('div');
         div.className = 'toast toast-' + (type || 'info');
         div.textContent = msg;
-        document.getElementById('toastContainer').appendChild(div);
+        const c = document.getElementById('toastContainer');
+        if (c) c.appendChild(div);
         setTimeout(() => { div.style.opacity = '0'; div.style.transform = 'translateY(8px)'; div.style.transition = 'all .25s'; }, 3000);
         setTimeout(() => div.remove(), 3300);
     }
@@ -68,67 +71,162 @@
         } catch (e) {}
     }
 
+    function isChildPerson(c) {
+        if (!c) return false;
+        if (c.role === 'child') return true;
+        if (c.role === 'adult') return false;
+        const yr = num(c.birthYear);
+        const curY = new Date().getFullYear();
+        return yr > 0 && (curY - yr) < 18 && num(c.incomeGross) === 0;
+    }
+
     /* ════════════ DATA STORE ════════════ */
-    const emptyContract = (clientId) => ({
-        id: uid(), clientId: clientId || '', insurer: '', contractNo: '',
-        start: null, end: null, premium: 0,
+    const DEFAULT_LOGO_URL = 'https://martin-cht.github.io/pojisteni/soubory/logo.png';
+    const DEFAULT_COMPANY = 'MyPlans';
+    let tableColMode = 'active'; // 'active' | 'core' | 'all'
+
+    const emptyContract = (clientId, which) => ({
+        id: uid(),
+        clientId: clientId || '',
+        insurer: '',
+        contractNo: '',
+        start: new Date().getFullYear(),
+        end: null,
+        premium: 0,
+        actionStatus: which === 'current' ? 'keep' : undefined,
+        proposalStatus: which === 'proposed' ? 'new' : undefined,
+        actionReason: '',
         items: Object.fromEntries(D.CATEGORIES.map(c => [c.key, 0])),
         conditions: {
-            pnWaitingDays: 29, pnRetroactive: false, pnFromDay: 29,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 3,
-            occupationCategory: '', paymentFrequency: 'monthly'
+            contractType: 'risk',
+            pnWaitingDays: 29,
+            pnFromDay: 29,
+            pnRetroactive: false,
+            hospWaitingDays: 0,
+            criticalIllnessWaitingMonths: 2,
+            tnProgression: 800,
+            invPsychIncluded: true,
+            backPainIncluded: true,
+            garanceTabulek: false,
+            occupationCategory: '1',
+            paymentFrequency: 'monthly',
+            employerContribution: 0,
+            taxDeductibleAnnual: 0
         },
         note: ''
     });
-    const DEFAULT_LOGO_URL = 'https://martin-cht.github.io/pojisteni/soubory/logo.png';
+
     function defaultState() {
-        return { clients: [], currentContracts: [], proposedContracts: [],
-                 loans: [], scenario: { person: '', pnDays: 90, hospDays: 5, injury: 'minor', retroactive: false },
-                 adviserBrief: '',
-                 advisorName: getCookie('insurance_advisor_name') || '',
-                 logoUrl: getCookie('insurance_logo_url') || DEFAULT_LOGO_URL };
+        return {
+            clients: [],
+            currentContracts: [],
+            proposedContracts: [],
+            loans: [],
+            scenario: {
+                person: '',
+                preset: 'fracture',
+                pnDays: 90,
+                hospDays: 5,
+                ocrDays: 0,
+                injury: 'minor',
+                retroactive: true,
+                tnDamagePct: 35,
+                includeCriticalIllness: false,
+                includeDisability3: false
+            },
+            adviserBrief: '',
+            advisorRecommendation: '',
+            advisorName: getCookie('insurance_advisor_name') || '',
+            advisorCompany: getCookie('insurance_advisor_company') || DEFAULT_COMPANY,
+            advisorIco: getCookie('insurance_advisor_ico') || '',
+            advisorPhone: getCookie('insurance_advisor_phone') || '',
+            advisorEmail: getCookie('insurance_advisor_email') || '',
+            modelId: getCookie('insurance_model_id') || ('MOD-' + new Date().getFullYear() + '-01'),
+            logoUrl: getCookie('insurance_logo_url') || DEFAULT_LOGO_URL
+        };
     }
 
     let state = defaultState();
+
+    function normalizeLoadedState(parsed) {
+        const base = defaultState();
+        state = Object.assign(base, parsed || {});
+        state.scenario = Object.assign(base.scenario, (parsed && parsed.scenario) || {});
+        if (!state.logoUrl || !state.logoUrl.trim()) {
+            state.logoUrl = getCookie('insurance_logo_url') || DEFAULT_LOGO_URL;
+        }
+        if (!state.advisorName || !state.advisorName.trim()) {
+            state.advisorName = getCookie('insurance_advisor_name') || '';
+        }
+        if (!state.advisorCompany || !state.advisorCompany.trim() || state.advisorCompany === 'Finanční & Pojistné Poradenství') {
+            state.advisorCompany = getCookie('insurance_advisor_company') || DEFAULT_COMPANY;
+        }
+        (state.clients || []).forEach(c => {
+            if (!c.role) c.role = isChildPerson(c) ? 'child' : 'adult';
+            if (c.expensesMonthly == null) c.expensesMonthly = c.role === 'adult' ? Math.round(num(c.incomeGross) * 0.5) : 0;
+            if (c.reserveCash == null) c.reserveCash = 0;
+            if (c.occupationRisk == null) c.occupationRisk = c.role === 'child' ? 'Dítě' : '1';
+        });
+        /* Automatické doplnění všech 32 kategorií a defaultních štítků pro existující smlouvy */
+        const keptContractNos = new Set((state.proposedContracts || []).map(c => (c.contractNo || '').trim()).filter(Boolean));
+        (state.currentContracts || []).forEach(c => {
+            c.items = c.items || {};
+            D.CATEGORIES.forEach(cat => { if (c.items[cat.key] == null) c.items[cat.key] = 0; });
+            c.conditions = Object.assign({
+                contractType: 'risk', pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: false,
+                hospWaitingDays: 0, criticalIllnessWaitingMonths: 2, tnProgression: 400,
+                invPsychIncluded: true, backPainIncluded: false, paymentFrequency: 'monthly',
+                employerContribution: 0, taxDeductibleAnnual: 0
+            }, c.conditions || {});
+            if (!c.actionStatus) {
+                c.actionStatus = (c.contractNo && keptContractNos.has(c.contractNo.trim())) ? 'keep' : 'cancel';
+            }
+            if (c.actionReason == null) c.actionReason = c.note || '';
+        });
+        const curContractNos = new Set((state.currentContracts || []).map(c => (c.contractNo || '').trim()).filter(Boolean));
+        (state.proposedContracts || []).forEach(c => {
+            c.items = c.items || {};
+            D.CATEGORIES.forEach(cat => { if (c.items[cat.key] == null) c.items[cat.key] = 0; });
+            c.conditions = Object.assign({
+                contractType: 'risk', pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
+                hospWaitingDays: 0, criticalIllnessWaitingMonths: 2, tnProgression: 800,
+                invPsychIncluded: true, backPainIncluded: true, paymentFrequency: 'monthly',
+                employerContribution: 0, taxDeductibleAnnual: 0
+            }, c.conditions || {});
+            if (!c.proposalStatus) {
+                const isExisting = (c.contractNo && curContractNos.has(c.contractNo.trim())) || /zachov/i.test(c.note || '');
+                c.proposalStatus = isExisting ? 'kept' : 'new';
+            }
+            if (c.actionReason == null) c.actionReason = c.note || '';
+        });
+    }
 
     function load() {
         try {
             const raw = lsGet(STORAGE_KEY);
             if (raw) {
-                const parsed = JSON.parse(raw);
-                /* Doplnění chybějících klíčů */
-                state = Object.assign(defaultState(), parsed);
-                state.scenario = Object.assign({ person: '', pnDays: 90, hospDays: 5, injury: 'minor', retroactive: false }, parsed.scenario || {});
-                /* Pokud stará data nemají logoUrl, nastavíme default. */
-                if (!state.logoUrl || !state.logoUrl.trim()) {
-                    state.logoUrl = getCookie('insurance_logo_url') || DEFAULT_LOGO_URL;
-                }
-                /* Pokud stará data nemají advisorName, ale je v cookies, načteme. */
-                if (!state.advisorName || !state.advisorName.trim()) {
-                    state.advisorName = getCookie('insurance_advisor_name') || '';
-                }
-                /* Doplnění items pro starší smlouvy */
-                ['currentContracts','proposedContracts'].forEach(k => {
-                    (state[k] || []).forEach(c => {
-                        c.items = c.items || {};
-                        D.CATEGORIES.forEach(cat => { if (c.items[cat.key] == null) c.items[cat.key] = 0; });
-                        c.conditions = c.conditions || { pnWaitingDays: 29, pnRetroactive: false };
-                    });
-                });
+                normalizeLoadedState(JSON.parse(raw));
             } else {
-                /* První spuštění — předvyplníme ukázkou z Excelu */
-                if (confirm('Načíst ukázková data z Vzor-2024.xlsm (rodina Hozna/Martina/Vilém/Tobiáš)? Můžete je následně přepsat či smazat.')) {
-                    state = clone(D.SAMPLE_DATA);
-                }
+                normalizeLoadedState(clone(D.SAMPLE_DATA));
+                save();
             }
         } catch (e) {
             console.warn('Load error:', e);
-            state = defaultState();
+            normalizeLoadedState(clone(D.SAMPLE_DATA));
         }
     }
+
     function save() {
         try { lsSet(STORAGE_KEY, JSON.stringify(state)); } catch (e) { toast('Chyba ukládání: ' + e.message, 'error'); }
         updateStoragePreview();
+    }
+
+    function loadSampleData() {
+        if (!confirm('Načíst vzorovou modelaci rodiny (Hozna / Martina / Vilém / Tobiáš) se všemi rozšířenými daty? Přepíše současný stav.')) return;
+        normalizeLoadedState(clone(D.SAMPLE_DATA));
+        save();
+        renderAll();
+        toast('Vzorová modelace načtena', 'success');
     }
 
     /* ════════════ TABS ════════════ */
@@ -136,73 +234,336 @@
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('tab-active', b.dataset.tab === name));
         document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('hidden', p.id !== 'pane-' + name));
         if (name === 'srovnani')  renderComparison();
-        if (name === 'scenar')    renderScenario();
+        if (name === 'scenar')    { renderScenario(); renderTnProgressionSim(); }
+        if (name === 'modelace')  { renderNeedsAnalysis(); renderTaxBenefitCalculator(); }
         if (name === 'pravo')     renderLegal();
         if (name === 'nastaveni') renderSettings();
         if (name === 'ai')        renderAiPanel();
+        if (window.lucide) lucide.createIcons();
     }
 
-    /* ════════════ KPI ════════════ */
+    /* ════════════ PREMIUM, SUMS & HEALTH SCORE ENGINE ════════════ */
+    function contractMonthlyPremium(c) {
+        const p = num(c.premium);
+        const f = c.conditions && c.conditions.paymentFrequency;
+        if (f === 'yearly') return p / 12;
+        if (f === 'quarterly') return p / 3;
+        if (f === 'singlepay') return 0;
+        return p;
+    }
     function totalPremiumMonthly(list) {
-        let total = 0;
-        (list || []).forEach(c => {
-            const p = num(c.premium);
-            const f = c.conditions && c.conditions.paymentFrequency;
-            if (f === 'yearly') total += p / 12;
-            else if (f === 'quarterly') total += p / 3;
-            else if (f === 'singlepay') total += 0;
-            else total += p; /* monthly */
-        });
-        return total;
+        return (list || []).reduce((s, c) => s + contractMonthlyPremium(c), 0);
     }
-    function totalPremiumYearly(list) { return totalPremiumMonthly(list) * 12; }
-
+    function totalEmployerBenefitMonthly(list) {
+        return (list || []).reduce((s, c) => s + num(c.conditions && c.conditions.employerContribution), 0);
+    }
     function sumItem(list, key) {
         return (list || []).reduce((s, c) => s + num(c.items && c.items[key]), 0);
     }
     function sumItemFor(list, clientId, key) {
         return (list || []).filter(c => c.clientId === clientId).reduce((s, c) => s + num(c.items && c.items[key]), 0);
     }
-    function sumLoans() { return state.loans.reduce((s, l) => s + num(l.amount), 0); }
+    function sumLoans() {
+        return (state.loans || []).reduce((s, l) => s + num(l.amount), 0);
+    }
+    function sumLoansFor(clientId) {
+        return (state.loans || []).filter(l => l.linkedClientId === clientId).reduce((s, l) => s + num(l.amount), 0);
+    }
+    function sumLoansMonthly() {
+        return (state.loans || []).reduce((s, l) => s + num(l.monthlyPayment), 0);
+    }
 
+    /* Efektivní krytí klíčových oblastí (zohledňuje konstantní + klesající složky) */
+    function effectiveDeathCover(list, clientId) {
+        const f = clientId ? list.filter(c => c.clientId === clientId) : list;
+        return sumItem(f, 'smrt') + sumItem(f, 'smrtKles');
+    }
+    function effectiveInv3Cover(list, clientId) {
+        const f = clientId ? list.filter(c => c.clientId === clientId) : list;
+        return sumItem(f, 'invalidita') + sumItem(f, 'invKles') + sumItem(f, 'invRenta') * 120;
+    }
+    function effectiveInv2Cover(list, clientId) {
+        const f = clientId ? list.filter(c => c.clientId === clientId) : list;
+        /* Pokud není samostatně zadána inv2, ale je zadána souhrnná invalidita/invKles, zohledníme */
+        const direct = sumItem(f, 'inv2') + sumItem(f, 'invKles');
+        return direct > 0 ? direct : sumItem(f, 'invalidita') * 0.5;
+    }
+    function effectiveInv1Cover(list, clientId) {
+        const f = clientId ? list.filter(c => c.clientId === clientId) : list;
+        return sumItem(f, 'inv1');
+    }
+    function effectiveZoCover(list, clientId) {
+        const f = clientId ? list.filter(c => c.clientId === clientId) : list;
+        return sumItem(f, 'zavOn') + sumItem(f, 'zavOnKles') + sumItem(f, 'zavOnMuzZena');
+    }
+    function effectiveTnCover(list, clientId) {
+        const f = clientId ? list.filter(c => c.clientId === clientId) : list;
+        return sumItem(f, 'tnUraz') + sumItem(f, 'tnUraz10');
+    }
+    function effectivePnDaily(list, clientId) {
+        const f = clientId ? list.filter(c => c.clientId === clientId) : list;
+        return sumItem(f, 'pn15') + sumItem(f, 'pn28') + sumItem(f, 'pn61');
+    }
+
+    /* Výpočet doporučených cílových hodnot (Needs Model) pro osobu */
+    function computeRecommendedNeeds(person, opts) {
+        opts = opts || {};
+        const deathYears = num(opts.deathYears) || 2;
+        const invYearsKey = opts.invYears || '10';
+        const zoMonths = num(opts.zoMonths) || 12;
+        const pnTargetPct = num(opts.pnTargetPct) || 0.90;
+
+        const isChild = isChildPerson(person);
+        const gross = num(person.incomeGross);
+        const net = D.computeNetIncome(gross, person.isEntrepreneur);
+        const loans = sumLoansFor(person.id);
+        const reserve = num(person.reserveCash);
+        const sick = D.computeExactSickLeave(gross, person.isEntrepreneur, 60);
+        const pens = D.computeStateDisabilityPension(gross, person.isEntrepreneur, person.birthYear);
+
+        if (isChild) {
+            return {
+                isChild: true,
+                netIncome: 0,
+                loans: 0,
+                sickMonthly: 0,
+                pens,
+                targets: {
+                    smrtTotal: 0,
+                    smrtConst: 0,
+                    smrtKles: 0,
+                    inv3: 2000000,
+                    inv2: 2000000,
+                    inv1: 1000000,
+                    trvaleNasledkyNemoc: 1000000,
+                    zavOn: 500000,
+                    tnUraz: 1000000,
+                    tnUraz10: 1000000,
+                    uraz: 300,
+                    hosp: 500,
+                    osetrovani: 400,
+                    pnDaily: 0
+                }
+            };
+        }
+
+        /* Dospělý */
+        const familyBuffer = Math.max(200000, Math.round(net * 12 * deathYears - reserve));
+        const smrtKlesTarget = Math.round(loans);
+        const smrtConstTarget = Math.round(familyBuffer / 100000) * 100000;
+        const smrtTotalTarget = smrtKlesTarget + smrtConstTarget;
+
+        /* Propad v invaliditě */
+        const gapInv3Monthly = Math.max(0, net - pens.inv3);
+        const gapInv2Monthly = Math.max(0, net - pens.inv2);
+        const gapInv1Monthly = Math.max(0, (net * 0.8) - pens.inv1);
+
+        let invMultMonths = 120; // 10 let
+        if (invYearsKey === '5') invMultMonths = 60;
+        else if (invYearsKey === '15') invMultMonths = 180;
+        else if (invYearsKey === 'to65') {
+            const age = person.birthYear ? Math.max(20, new Date().getFullYear() - num(person.birthYear)) : 38;
+            const yrsTo65 = Math.max(5, 65 - age);
+            /* Diskontovaný rentiérský faktor při 4,5 % p.a. reálně cca 3 % nad inflací */
+            const r = 0.03;
+            const pvFactor = (1 - Math.pow(1 + r, -yrsTo65)) / r;
+            invMultMonths = Math.round(pvFactor * 12);
+        }
+
+        const inv3Target = Math.max(1000000, Math.round((loans * 0.8 + gapInv3Monthly * invMultMonths - reserve * 0.5) / 100000) * 100000);
+        const inv2Target = Math.max(1000000, Math.round((loans * 0.6 + gapInv2Monthly * invMultMonths * 0.85) / 100000) * 100000);
+        const inv1Target = Math.max(500000,  Math.round((gapInv1Monthly * Math.min(84, invMultMonths * 0.6)) / 100000) * 100000);
+
+        const zavOnTarget = Math.max(500000, Math.round((net * zoMonths + loans * 0.15) / 100000) * 100000);
+        const tnUrazTarget = 1000000;
+        const tnUraz10Target = 1000000;
+
+        /* Denní propad v PN */
+        const targetMonthlyInPn = net * pnTargetPct;
+        const monthlyGapPn = Math.max(0, targetMonthlyInPn - sick.monthlyAvg);
+        const pnDailyTarget = Math.max(0, Math.round((monthlyGapPn / 30) / 50) * 50);
+
+        return {
+            isChild: false,
+            netIncome: net,
+            loans,
+            sickMonthly: sick.monthlyAvg,
+            sick,
+            pens,
+            gapInv3Monthly,
+            gapInv2Monthly,
+            gapInv1Monthly,
+            monthlyGapPn,
+            targets: {
+                smrtTotal: smrtTotalTarget,
+                smrtConst: smrtConstTarget,
+                smrtKles: smrtKlesTarget,
+                inv3: inv3Target,
+                inv2: inv2Target,
+                inv1: inv1Target,
+                trvaleNasledkyNemoc: 0,
+                zavOn: zavOnTarget,
+                tnUraz: tnUrazTarget,
+                tnUraz10: tnUraz10Target,
+                uraz: 200,
+                hosp: 500,
+                osetrovani: 300,
+                pnDaily: pnDailyTarget
+            }
+        };
+    }
+
+    /* Výpočet 5 pilířů ochrany (0–100 %) pro radarový graf a Health Score */
+    function computePortfolioPillars(list, filterPersonId) {
+        const persons = filterPersonId && filterPersonId !== 'ALL'
+            ? state.clients.filter(c => c.id === filterPersonId)
+            : state.clients;
+
+        if (!persons.length) {
+            return { scores: [0, 0, 0, 0, 0], overall: 0 };
+        }
+
+        let sumP1 = 0, sumP2 = 0, sumP3 = 0, sumP4 = 0, sumP5 = 0;
+        let adultCount = 0;
+
+        persons.forEach(p => {
+            const needs = computeRecommendedNeeds(p);
+            const t = needs.targets;
+            const pContracts = (list || []).filter(c => c.clientId === p.id);
+
+            /* Pilíř 1: Smrt a úvěry */
+            let s1 = 100;
+            if (!needs.isChild) {
+                adultCount++;
+                const haveDeath = effectiveDeathCover(list, p.id);
+                s1 = t.smrtTotal > 0 ? Math.min(100, Math.round((haveDeath / t.smrtTotal) * 100)) : 100;
+            }
+            /* Pilíř 2: Invalidita I.–III. st. a soběstačnost */
+            const haveInv3 = effectiveInv3Cover(list, p.id) + sumItemFor(list, p.id, 'trvaleNasledkyNemoc');
+            const haveInv2 = effectiveInv2Cover(list, p.id);
+            const haveInv1 = effectiveInv1Cover(list, p.id);
+            const s2_3 = t.inv3 > 0 ? Math.min(100, (haveInv3 / t.inv3) * 100) : 100;
+            const s2_2 = t.inv2 > 0 ? Math.min(100, (haveInv2 / t.inv2) * 100) : 100;
+            const s2_1 = t.inv1 > 0 ? Math.min(100, (haveInv1 / t.inv1) * 100) : 100;
+            const s2 = Math.round(s2_3 * 0.5 + s2_2 * 0.3 + s2_1 * 0.2);
+
+            /* Pilíř 3: Závažná onemocnění & Trvalé následky úrazu */
+            const haveZo = effectiveZoCover(list, p.id);
+            const haveTn = effectiveTnCover(list, p.id);
+            const s3_zo = t.zavOn > 0 ? Math.min(100, (haveZo / t.zavOn) * 100) : 100;
+            const s3_tn = t.tnUraz > 0 ? Math.min(100, (haveTn / t.tnUraz) * 100) : 100;
+            const s3 = Math.round(s3_zo * 0.55 + s3_tn * 0.45);
+
+            /* Pilíř 4: Krátkodobý příjem (PN, Hospitalizace, OČR) */
+            const havePn = effectivePnDaily(list, p.id);
+            const haveHosp = sumItemFor(list, p.id, 'hosp') + sumItemFor(list, p.id, 'hospUraz');
+            const haveOcr = sumItemFor(list, p.id, 'osetrovani');
+            const s4_pn = t.pnDaily > 0 ? Math.min(100, (havePn / t.pnDaily) * 100) : 85;
+            const s4_hosp = t.hosp > 0 ? Math.min(100, (haveHosp / t.hosp) * 100) : 100;
+            const s4_ocr = haveOcr > 0 ? 100 : 50;
+            const s4 = needs.isChild
+                ? Math.round(s4_hosp * 0.6 + s4_ocr * 0.4)
+                : Math.round(s4_pn * 0.6 + s4_hosp * 0.25 + s4_ocr * 0.15);
+
+            /* Pilíř 5: Kvalita podmínek (progrese TN >= 800 %, psychika kryta, čistě rizikové) */
+            let s5 = 40;
+            if (pContracts.length > 0) {
+                const maxProg = Math.max(...pContracts.map(c => num(c.conditions && c.conditions.tnProgression) || 100));
+                const hasPsych = pContracts.some(c => c.conditions && c.conditions.invPsychIncluded);
+                const hasRetro = pContracts.some(c => c.conditions && c.conditions.pnRetroactive);
+                const isRisk = pContracts.some(c => !c.conditions || c.conditions.contractType === 'risk');
+                s5 = (maxProg >= 800 ? 35 : maxProg >= 500 ? 22 : 10)
+                   + (hasPsych ? 25 : 5)
+                   + (hasRetro ? 20 : 10)
+                   + (isRisk ? 20 : 5);
+            } else {
+                s5 = 0;
+            }
+
+            if (!needs.isChild) sumP1 += s1;
+            sumP2 += s2;
+            sumP3 += s3;
+            sumP4 += s4;
+            sumP5 += s5;
+        });
+
+        const n = persons.length;
+        const p1 = adultCount > 0 ? Math.round(sumP1 / adultCount) : Math.round(sumP2 / n);
+        const p2 = Math.round(sumP2 / n);
+        const p3 = Math.round(sumP3 / n);
+        const p4 = Math.round(sumP4 / n);
+        const p5 = Math.round(sumP5 / n);
+        const overall = Math.round(p1 * 0.28 + p2 * 0.27 + p3 * 0.20 + p4 * 0.15 + p5 * 0.10);
+
+        return {
+            labels: ['Smrt & Úvěry', 'Invalidita I.–III.', 'Závažné nemoci & TN', 'PN, OČR & Nemocnice', 'Kvalita podmínek'],
+            scores: [p1, p2, p3, p4, p5],
+            overall
+        };
+    }
+
+    /* ════════════ KPI RENDER ════════════ */
     function renderKPIs() {
         const curM = totalPremiumMonthly(state.currentContracts);
         const newM = totalPremiumMonthly(state.proposedContracts);
-        document.getElementById('kpiCurrentYearly').textContent  = fmtCZK(curM * 12);
+        const empBen = totalEmployerBenefitMonthly(state.proposedContracts);
+        const netClientM = Math.max(0, newM - empBen);
+
         document.getElementById('kpiCurrentMonthly').textContent = fmtCZK(curM) + ' / měs';
-        document.getElementById('kpiProposedYearly').textContent  = fmtCZK(newM * 12);
+        document.getElementById('kpiCurrentYearly').textContent  = fmtCZK(curM * 12) + ' / rok';
         document.getElementById('kpiProposedMonthly').textContent = fmtCZK(newM) + ' / měs';
+        document.getElementById('kpiProposedYearly').textContent  =
+            empBen > 0 ? `${fmtCZK(newM * 12)}/r (klient: ${fmtCZK(netClientM)}/m)` : `${fmtCZK(newM * 12)} / rok`;
+
         const diff = newM - curM;
         const diffEl = document.getElementById('kpiDiffMonthly');
         diffEl.textContent = (diff >= 0 ? '+' : '') + fmtCZK(diff);
-        diffEl.className = 'stat-value ' + (diff > 0 ? 'text-rose-300' : diff < 0 ? 'text-emerald-300' : 'text-slate-300');
+        diffEl.className = 'stat-value ' + (diff > 0 ? 'text-amber-300' : diff < 0 ? 'text-emerald-300' : 'text-slate-300');
         const pct = curM > 0 ? (diff / curM * 100) : (newM > 0 ? 100 : 0);
-        document.getElementById('kpiDiffPct').textContent = (pct >= 0 ? '+' : '') + pct.toFixed(0) + ' %';
+        document.getElementById('kpiDiffPct').textContent = (pct >= 0 ? '+' : '') + pct.toFixed(0) + ' % (' + (diff * 12 >= 0 ? '+' : '') + fmtCZK(diff * 12) + '/r)';
 
-        /* Podpojištění (smrt vs. závazky pro hlavního klienta = první, nebo specifikovaný) */
+        /* Krytí závazků (Smrt + Smrt klesající vs. Úvěry) */
         const loanTotal = sumLoans();
-        const newSmrt = sumItem(state.proposedContracts, 'smrt');
-        const under = Math.max(0, loanTotal - newSmrt);
-        document.getElementById('kpiUnderinsured').textContent = fmtCZKShort(under);
-        document.getElementById('kpiUnderinsuredLabel').textContent =
-            under > 0 ? 'Chybí krytí závazků' : (loanTotal > 0 ? 'Plně kryto návrhem' : 'Nezadané závazky');
+        const curDeath = effectiveDeathCover(state.currentContracts);
+        const newDeath = effectiveDeathCover(state.proposedContracts);
+        const under = Math.max(0, loanTotal - newDeath);
+        const underEl = document.getElementById('kpiUnderinsured');
+        if (loanTotal === 0) {
+            underEl.textContent = fmtCZKShort(newDeath);
+            underEl.className = 'stat-value text-sky-300';
+            document.getElementById('kpiUnderinsuredLabel').textContent = 'Bez úvěrů · Celková smrt v návrhu';
+        } else if (under === 0) {
+            underEl.textContent = '100 % KRYTO';
+            underEl.className = 'stat-value text-emerald-300';
+            document.getElementById('kpiUnderinsuredLabel').textContent = `Dnes ${fmtCZKShort(curDeath)} → Návrh ${fmtCZKShort(newDeath)} (úvěry ${fmtCZKShort(loanTotal)})`;
+        } else {
+            underEl.textContent = 'Chybí ' + fmtCZKShort(under);
+            underEl.className = 'stat-value text-rose-300';
+            document.getElementById('kpiUnderinsuredLabel').textContent = `Návrh ${fmtCZKShort(newDeath)} vs. úvěry ${fmtCZKShort(loanTotal)}`;
+        }
 
-        /* Pokryté kategorie */
+        /* Index kvality zajištění (Health Score) */
+        const curPillars = computePortfolioPillars(state.currentContracts, 'ALL');
+        const newPillars = computePortfolioPillars(state.proposedContracts, 'ALL');
+        document.getElementById('kpiHealthScore').textContent = `${curPillars.overall} % → ${newPillars.overall} %`;
         const covCurr = D.CATEGORIES.filter(c => sumItem(state.currentContracts, c.key) > 0).length;
         const covNew  = D.CATEGORIES.filter(c => sumItem(state.proposedContracts, c.key) > 0).length;
-        document.getElementById('kpiCategoriesCovered').textContent = covCurr + ' → ' + covNew + ' / ' + D.CATEGORIES.length;
-        document.getElementById('kpiCategoriesCoveredLabel').textContent = 'stáv. → návrh';
+        document.getElementById('kpiCategoriesCoveredLabel').textContent = `Rizika: ${covCurr} → ${covNew} z ${D.CATEGORIES.length}`;
 
-        /* Klienti / smlouvy */
-        document.getElementById('kpiClientCount').textContent = state.clients.length;
-        document.getElementById('kpiContractCount').textContent =
-            (state.currentContracts.length + state.proposedContracts.length) + ' smluv (stáv.+ návrh)';
+        /* Akční plán smluv */
+        const keptCount = state.currentContracts.filter(c => c.actionStatus === 'keep' || c.actionStatus === 'modify').length;
+        const cancelCount = state.currentContracts.filter(c => c.actionStatus === 'cancel' || c.actionStatus === 'consolidate').length;
+        const newCount = state.proposedContracts.filter(c => c.proposalStatus === 'new').length;
+        document.getElementById('kpiClientCount').textContent = `${state.clients.length} osob · ${state.proposedContracts.length} sml.`;
+        document.getElementById('kpiContractCount').textContent = `${keptCount} ponechat · ${cancelCount} zrušit · ${newCount} nové`;
 
         /* Top nav stats */
         document.getElementById('navClients').textContent = state.clients.length;
         document.getElementById('navCurrentCount').textContent = state.currentContracts.length;
         document.getElementById('navProposedCount').textContent = state.proposedContracts.length;
         document.getElementById('navDiff').textContent = (diff >= 0 ? '+' : '') + fmtCZK(diff);
+        const navScore = document.getElementById('navScore');
+        if (navScore) navScore.textContent = `${curPillars.overall} → ${newPillars.overall} %`;
     }
 
     /* ════════════ CLIENTS ════════════ */
@@ -210,84 +571,180 @@
         const container = document.getElementById('clientsList');
         if (!state.clients.length) {
             container.innerHTML = `<div class="text-xs text-slate-500 italic text-center py-8 border border-dashed border-slate-800 rounded">
-                Žádní klienti — přidejte první osobu tlačítkem nahoře.
+                Žádné pojištěné osoby — přidejte dospělého nebo dítě tlačítkem nahoře.
             </div>`;
             return;
         }
-        container.innerHTML = state.clients.map(c => `
-            <div class="client-card">
-                <div class="grid grid-cols-1 lg:grid-cols-5 gap-3 items-end">
+        const curYear = new Date().getFullYear();
+        container.innerHTML = state.clients.map(c => {
+            const isChild = isChildPerson(c);
+            const age = c.birthYear ? (curYear - num(c.birthYear)) : null;
+            const net = D.computeNetIncome(c.incomeGross, c.isEntrepreneur);
+            const sick = D.computeExactSickLeave(c.incomeGross, c.isEntrepreneur, 30);
+            const pens = D.computeStateDisabilityPension(c.incomeGross, c.isEntrepreneur, c.birthYear);
+            const gapPn = Math.max(0, net - sick.monthlyAvg);
+            const gapInv3 = Math.max(0, net - pens.inv3);
+
+            return `
+            <div class="client-card ${isChild ? 'child-card' : ''}">
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-2.5 items-end">
                     <label class="block lg:col-span-2">
-                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Jméno</span>
-                        <input type="text" class="pro-input" value="${escapeHtml(c.name)}"
-                            onchange="app.updateClient('${c.id}', 'name', this.value)">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Jméno a příjmení / role</span>
+                        <div class="flex gap-1.5">
+                            <select class="pro-input" style="width:95px" onchange="app.updateClient('${c.id}', 'role', this.value)">
+                                <option value="adult" ${!isChild ? 'selected' : ''}>👤 Dospělý</option>
+                                <option value="child" ${isChild ? 'selected' : ''}>🧸 Dítě</option>
+                            </select>
+                            <input type="text" class="pro-input" value="${escapeHtml(c.name)}"
+                                onchange="app.updateClient('${c.id}', 'name', this.value)">
+                        </div>
                     </label>
                     <label class="block">
-                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Rok narození</span>
-                        <input type="number" class="pro-input" value="${c.birthYear || ''}" min="1900" max="2100"
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Rok nar. ${age != null ? `<span class="text-sky-400">(${age} let)</span>` : ''}</span>
+                        <input type="number" class="pro-input" value="${c.birthYear || ''}" min="1920" max="2030" placeholder="např. 1985"
                             onchange="app.updateClient('${c.id}', 'birthYear', this.value)">
                     </label>
                     <label class="block">
-                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Hrubý příjem / měs (Kč)</span>
-                        <input type="number" class="pro-input" value="${c.incomeGross || 0}" min="0" step="1000"
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Hrubý příjem / měs (Kč)</span>
+                        <input type="number" class="pro-input" value="${c.incomeGross || 0}" min="0" step="1000" ${isChild ? 'disabled' : ''}
                             onchange="app.updateClient('${c.id}', 'incomeGross', this.value)">
                     </label>
-                    <div class="flex items-end gap-2">
-                        <label class="flex items-center gap-2 text-xs text-slate-300 grow">
-                            <input type="checkbox" class="pro-input" ${c.isEntrepreneur ? 'checked' : ''}
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Měs. výdaje / podíl (Kč)</span>
+                        <input type="number" class="pro-input" value="${c.expensesMonthly || 0}" min="0" step="1000" ${isChild ? 'disabled' : ''}
+                            onchange="app.updateClient('${c.id}', 'expensesMonthly', this.value)">
+                    </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Finanční rezerva (Kč)</span>
+                        <input type="number" class="pro-input" value="${c.reserveCash || 0}" min="0" step="10000"
+                            onchange="app.updateClient('${c.id}', 'reserveCash', this.value)">
+                    </label>
+                    <div class="flex items-center justify-between gap-2 pt-3">
+                        <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+                            <input type="checkbox" class="pro-input" ${c.isEntrepreneur ? 'checked' : ''} ${isChild ? 'disabled' : ''}
                                 onchange="app.updateClient('${c.id}', 'isEntrepreneur', this.checked)">
-                            <span>OSVČ / podnikatel</span>
+                            <span>OSVČ</span>
                         </label>
                         <button onclick="app.removeClient('${c.id}')" class="btn-danger" title="Smazat osobu">
                             <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                         </button>
                     </div>
                 </div>
-                <div class="text-[11px] text-slate-500 mt-2 flex flex-wrap gap-3">
-                    <span>Stáv. smluv: <strong class="text-slate-300">${state.currentContracts.filter(s => s.clientId === c.id).length}</strong></span>
-                    <span>Návrh: <strong class="text-slate-300">${state.proposedContracts.filter(s => s.clientId === c.id).length}</strong></span>
-                    <span>Sazba NČSSZ: <strong class="text-slate-300">${(D.sickLeaveRate(c.incomeGross) * 100).toFixed(0)} %</strong></span>
+
+                <div class="mt-2 grid grid-cols-1 lg:grid-cols-3 gap-2">
+                    <div class="lg:col-span-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-400 bg-slate-950/50 px-3 py-1.5 rounded border border-slate-800/80">
+                        ${!isChild ? `
+                            <span>Čistý příjem: <strong class="text-emerald-300 font-mono">${fmtCZK(net)}</strong></span>
+                            <span>Nemocenská ČSSZ: <strong class="text-sky-300 font-mono">${fmtCZK(sick.monthlyAvg)}/měs</strong> <span class="text-rose-400">(propad -${fmtCZK(gapPn)}/m)</span></span>
+                            <span>Státní ID (I./II./III.): <strong class="text-amber-300 font-mono">${fmtCZKShort(pens.inv1)} / ${fmtCZKShort(pens.inv2)} / ${fmtCZKShort(pens.inv3)} Kč</strong></span>
+                            <span>Propad v Inv III: <strong class="text-rose-300 font-mono">-${fmtCZK(gapInv3)}/měs</strong></span>
+                        ` : `
+                            <span class="text-violet-300 font-semibold">🧸 Dětský pojistný profil:</span>
+                            <span>Priorita: <strong>Dětská invalidita / soběstačnost, Závažné nemoci, Trvalé následky úrazu s progresí, Ošetřování dítěte (OČR)</strong></span>
+                        `}
+                    </div>
+                    <div>
+                        <input type="text" class="pro-input text-[11px]" placeholder="Zdravotní poznámka / povolání / sport (např. kardio 2021, RS 1)…"
+                            value="${escapeHtml(c.notes || '')}" onchange="app.updateClient('${c.id}', 'notes', this.value)">
+                    </div>
                 </div>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
         if (window.lucide) lucide.createIcons();
     }
-    function addClient() {
-        const c = { id: uid(), name: 'Nová osoba ' + (state.clients.length + 1), incomeGross: 0, isEntrepreneur: false, birthYear: null };
+
+    function addClient(role) {
+        const isChild = role === 'child';
+        const c = {
+            id: uid(),
+            name: (isChild ? 'Dítě ' : 'Osoba ') + (state.clients.length + 1),
+            role: isChild ? 'child' : 'adult',
+            incomeGross: isChild ? 0 : 45000,
+            expensesMonthly: isChild ? 0 : 25000,
+            reserveCash: 0,
+            isEntrepreneur: false,
+            birthYear: isChild ? 2018 : 1988,
+            notes: ''
+        };
         state.clients.push(c);
-        save(); renderAll();
+        save();
+        renderAll();
         toast('Osoba přidána', 'success');
     }
+
     function updateClient(id, field, value) {
         const c = state.clients.find(c => c.id === id);
         if (!c) return;
-        if (field === 'incomeGross' || field === 'birthYear') value = num(value);
+        if (['incomeGross', 'birthYear', 'expensesMonthly', 'reserveCash'].includes(field)) value = num(value);
         c[field] = value;
+        if (field === 'role' && value === 'child') {
+            c.incomeGross = 0;
+            c.expensesMonthly = 0;
+            c.isEntrepreneur = false;
+        }
         save();
-        renderKPIs(); refreshScenarioPersons(); refreshCompareFilter(); refreshClientSelectors();
+        renderClients();
+        renderKPIs();
+        refreshScenarioPersons();
+        refreshCompareFilter();
+        refreshClientSelectors();
     }
+
     function removeClient(id) {
         if (!confirm('Smazat tuto osobu a všechny její smlouvy?')) return;
         state.clients = state.clients.filter(c => c.id !== id);
         state.currentContracts  = state.currentContracts.filter(s => s.clientId !== id);
         state.proposedContracts = state.proposedContracts.filter(s => s.clientId !== id);
         state.loans = state.loans.filter(l => l.linkedClientId !== id);
-        save(); renderAll();
+        save();
+        renderAll();
     }
 
-    /* ════════════ CONTRACTS (rendering as grouped by client) ════════════ */
+    /* ════════════ CONTRACTS TABLE & ACTIONS ════════════ */
     function clientName(id) {
         const c = state.clients.find(c => c.id === id);
-        return c ? c.name : '(bez klienta)';
+        return c ? c.name : '(nepřiřazeno)';
     }
+
+    function getVisibleCategories() {
+        if (tableColMode === 'all') return D.CATEGORIES;
+        if (tableColMode === 'core') return D.CATEGORIES.filter(c => c.core);
+        /* 'active' mode: všechna rizika, která mají > 0 ve stávajícím NEBO v návrhu, + základní kostra */
+        const baseKeys = new Set(['smrt', 'smrtKles', 'invalidita', 'inv2', 'inv1', 'zavOn', 'tnUraz', 'uraz', 'hosp', 'pn28']);
+        return D.CATEGORIES.filter(c =>
+            baseKeys.has(c.key) ||
+            sumItem(state.currentContracts, c.key) > 0 ||
+            sumItem(state.proposedContracts, c.key) > 0
+        );
+    }
+
+    function setTableColMode(mode) {
+        tableColMode = mode || 'active';
+        const s1 = document.getElementById('colModeCurrent');
+        const s2 = document.getElementById('colModeProposed');
+        if (s1) s1.value = tableColMode;
+        if (s2) s2.value = tableColMode;
+        renderContractsGroup('current');
+        renderContractsGroup('proposed');
+    }
+
+    function actionBadgeHtml(c, which) {
+        const list = D.CONTRACT_ACTIONS[which] || [];
+        const key = which === 'current' ? (c.actionStatus || 'keep') : (c.proposalStatus || 'new');
+        const found = list.find(a => a.key === key) || list[0];
+        return `<span class="badge badge-${found.badge}" title="${escapeHtml(found.desc)}">${escapeHtml(found.short)}</span>`;
+    }
+
     function renderContractsGroup(which) {
         const container = document.getElementById(which === 'current' ? 'currentContractsContainer' : 'proposedContractsContainer');
+        if (!container) return;
         const list = which === 'current' ? state.currentContracts : state.proposedContracts;
         const accent = which === 'current' ? 'emerald' : 'sky';
+        const visCats = getVisibleCategories();
 
         if (!state.clients.length) {
             container.innerHTML = `<div class="text-xs text-slate-500 italic text-center py-8 border border-dashed border-slate-800 rounded">
-                Nejprve přidejte alespoň jednu osobu v záložce <strong>Klient & Rodina</strong>.
+                Nejprve přidejte alespoň jednu osobu v záložce <strong>1. Klient & Zadání</strong>.
             </div>`;
             return;
         }
@@ -299,44 +756,41 @@
 
         const blocks = state.clients.map(person => {
             const items = groups[person.id] || [];
-            const sums = D.CATEGORIES.map(cat => sumItemFor(list, person.id, cat.key));
-            const personPremium = items.reduce((s, c) => {
-                const f = c.conditions && c.conditions.paymentFrequency;
-                const p = num(c.premium);
-                if (f === 'yearly') return s + p / 12;
-                if (f === 'quarterly') return s + p / 3;
-                if (f === 'singlepay') return s;
-                return s + p;
-            }, 0);
+            const sums = visCats.map(cat => sumItemFor(list, person.id, cat.key));
+            const personPremium = items.reduce((s, c) => s + contractMonthlyPremium(c), 0);
+
             return `
                 <div class="contract-block">
                     <div class="contract-block-header">
                         <div class="flex items-center gap-2">
                             <span class="badge badge-${accent}">${escapeHtml(person.name)}</span>
-                            <span class="text-[10px] text-slate-500 font-mono">${items.length} sml.</span>
+                            <span class="text-[10px] text-slate-400 font-mono">${items.length} sml.</span>
+                            ${person.notes ? `<span class="text-[10px] text-amber-400/90 italic hidden md:inline">· ${escapeHtml(person.notes)}</span>` : ''}
                         </div>
                         <div class="text-[11px] text-slate-300 font-mono">
                             Σ měs: <strong class="text-${accent}-300">${fmtCZK(personPremium)}</strong>
+                            <span class="text-slate-500 ml-1">(${fmtCZK(personPremium * 12)}/rok)</span>
                         </div>
                     </div>
                     <div class="overflow-x-auto">
                         <table class="data-table">
                             <thead>
                                 <tr>
-                                    <th>Smlouva</th>
-                                    ${D.CATEGORIES.map(c => `<th title="${escapeHtml(c.label)} — ${escapeHtml(c.help)}" class="num">${escapeHtml(c.mini)}</th>`).join('')}
-                                    <th class="num">Pl./měs</th>
-                                    <th></th>
+                                    <th style="min-width:190px">Pojišťovna & Smlouva</th>
+                                    <th style="min-width:120px">Doporučení poradce</th>
+                                    ${visCats.map(c => `<th title="${escapeHtml(c.label)} — ${escapeHtml(c.help)}" class="num">${escapeHtml(c.mini)}</th>`).join('')}
+                                    <th class="num">Platba/měs</th>
+                                    <th>Akce</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                ${items.map(c => renderContractRow(c, which)).join('')}
-                                ${!items.length ? `<tr><td colspan="${D.CATEGORIES.length + 3}" class="text-center text-[10px] text-slate-500 italic py-2">Žádné smlouvy.</td></tr>` : ''}
+                                ${items.map(c => renderContractRow(c, which, visCats)).join('')}
+                                ${!items.length ? `<tr><td colspan="${visCats.length + 4}" class="text-center text-[11px] text-slate-500 italic py-3">Žádné smlouvy pro tuto osobu.</td></tr>` : ''}
                             </tbody>
                             ${items.length ? `<tfoot>
                                 <tr>
-                                    <td>Σ</td>
-                                    ${sums.map((v, i) => `<td class="${v ? '' : 'dash'}">${v ? fmtCZKShort(v) : '·'}</td>`).join('')}
+                                    <td colspan="2">Σ ${escapeHtml(person.name)}</td>
+                                    ${sums.map((v, i) => `<td class="${v ? '' : 'dash'}">${fmtCatShort(v, visCats[i])}</td>`).join('')}
                                     <td>${fmtCZK(personPremium)}</td>
                                     <td></td>
                                 </tr>
@@ -346,56 +800,52 @@
                 </div>`;
         });
 
-        if (groups['_none'].length) {
-            blocks.push(`
-                <div class="contract-block">
-                    <div class="contract-block-header">
-                        <span class="badge badge-slate">Nepřiřazené smlouvy</span>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Smlouva</th>
-                                    ${D.CATEGORIES.map(c => `<th title="${escapeHtml(c.label)}" class="num">${escapeHtml(c.mini)}</th>`).join('')}
-                                    <th class="num">Pl./měs</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody>${groups['_none'].map(c => renderContractRow(c, which)).join('')}</tbody>
-                        </table>
-                    </div>
-                </div>`);
-        }
-
         container.innerHTML = blocks.join('');
         if (window.lucide) lucide.createIcons();
     }
 
-    function renderContractRow(c, which) {
+    function renderContractRow(c, which, visCats) {
+        const actionsList = D.CONTRACT_ACTIONS[which] || [];
+        const curStatus = which === 'current' ? (c.actionStatus || 'keep') : (c.proposalStatus || 'new');
+        const prog = c.conditions && c.conditions.tnProgression ? `TN ${c.conditions.tnProgression}%` : '';
+        const retro = c.conditions && c.conditions.pnRetroactive ? 'PN zpětně' : '';
+        const metaTags = [prog, retro].filter(Boolean).join(' · ');
+
         return `<tr>
             <td>
                 <div class="flex flex-col leading-tight">
-                    <span class="text-[10.5px] font-semibold text-slate-200">${escapeHtml(c.insurer || '—')}</span>
-                    <span class="text-[9px] text-slate-500 font-mono">${escapeHtml(c.contractNo || '—')}${c.start || c.end ? ` · ${c.start || '?'}–${c.end || '?'}` : ''}</span>
-                    ${c.note ? `<span class="text-[9px] text-amber-400/80 italic">${escapeHtml(c.note)}</span>` : ''}
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-[11px] font-semibold text-slate-100">${escapeHtml(c.insurer || '—')}</span>
+                        ${metaTags ? `<span class="text-[9px] px-1 rounded bg-slate-800 text-sky-300 font-mono">${escapeHtml(metaTags)}</span>` : ''}
+                    </div>
+                    <span class="text-[9.5px] text-slate-400 font-mono">${escapeHtml(c.contractNo || '—')}${c.start || c.end ? ` · ${c.start || '?'}–${c.end || '?'}` : ''}</span>
+                    ${(c.actionReason || c.note) ? `<span class="text-[9.5px] text-amber-300/90 italic mt-0.5">${escapeHtml(c.actionReason || c.note)}</span>` : ''}
                 </div>
             </td>
-            ${D.CATEGORIES.map(cat => {
+            <td>
+                <div class="flex flex-col gap-1">
+                    <div>${actionBadgeHtml(c, which)}</div>
+                    <select class="bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-300 px-1 py-0.5 outline-none"
+                        onchange="app.updateContractAction('${which}', '${c.id}', this.value)">
+                        ${actionsList.map(a => `<option value="${a.key}" ${curStatus === a.key ? 'selected' : ''}>${escapeHtml(a.label)}</option>`).join('')}
+                    </select>
+                </div>
+            </td>
+            ${visCats.map(cat => {
                 const v = num(c.items && c.items[cat.key]);
                 if (!v) return `<td class="dash">·</td>`;
-                return `<td class="num">${cat.kind === 'daily' ? v + '/d' : fmtCZKShort(v)}</td>`;
+                return `<td class="num" title="${escapeHtml(cat.label)}: ${fmtCatValue(v, cat)}">${fmtCatShort(v, cat)}</td>`;
             }).join('')}
-            <td class="num">${fmtCZK(c.premium || 0)}</td>
+            <td class="num font-semibold">${fmtCZK(contractMonthlyPremium(c))}</td>
             <td>
                 <div class="flex gap-0.5">
-                    <button onclick="app.editContract('${which}','${c.id}')" class="btn-secondary" title="Upravit">
+                    <button onclick="app.editContract('${which}','${c.id}')" class="btn-secondary" title="Upravit všechna rizika a podmínky">
                         <i data-lucide="edit-2" class="w-3 h-3"></i>
                     </button>
-                    <button onclick="app.duplicateContract('${which}','${c.id}')" class="btn-secondary" title="Duplikovat">
+                    <button onclick="app.duplicateContract('${which}','${c.id}')" class="btn-secondary" title="Duplikovat smlouvu">
                         <i data-lucide="copy" class="w-3 h-3"></i>
                     </button>
-                    <button onclick="app.removeContract('${which}','${c.id}')" class="btn-danger" title="Smazat">
+                    <button onclick="app.removeContract('${which}','${c.id}')" class="btn-danger" title="Smazat smlouvu">
                         <i data-lucide="trash-2" class="w-3 h-3"></i>
                     </button>
                 </div>
@@ -403,41 +853,86 @@
         </tr>`;
     }
 
+    function updateContractAction(which, id, status) {
+        const list = which === 'current' ? state.currentContracts : state.proposedContracts;
+        const c = list.find(x => x.id === id);
+        if (!c) return;
+        if (which === 'current') c.actionStatus = status;
+        else c.proposalStatus = status;
+        save();
+        renderContractsGroup(which);
+        renderKPIs();
+    }
+
     function addContract(which) {
         if (!state.clients.length) { toast('Nejprve přidejte osobu', 'error'); switchTab('klient'); return; }
-        const c = emptyContract(state.clients[0].id);
+        const c = emptyContract(state.clients[0].id, which);
         (which === 'current' ? state.currentContracts : state.proposedContracts).push(c);
         save();
         editContract(which, c.id);
         renderContractsGroup(which);
         renderKPIs();
     }
+
     function removeContract(which, id) {
-        if (!confirm('Smazat smlouvu?')) return;
+        if (!confirm('Smazat tuto smlouvu?')) return;
         if (which === 'current') state.currentContracts = state.currentContracts.filter(c => c.id !== id);
         else                     state.proposedContracts = state.proposedContracts.filter(c => c.id !== id);
         save();
         renderContractsGroup(which);
         renderKPIs();
     }
+
     function duplicateContract(which, id) {
         const list = which === 'current' ? state.currentContracts : state.proposedContracts;
         const c = list.find(c => c.id === id);
         if (!c) return;
-        const copy = clone(c); copy.id = uid(); copy.contractNo = (copy.contractNo || '') + ' (kopie)';
+        const copy = clone(c);
+        copy.id = uid();
+        copy.contractNo = (copy.contractNo || '') + ' (kopie)';
         list.push(copy);
-        save(); renderContractsGroup(which); renderKPIs();
-    }
-    function copyFromCurrent() {
-        if (!confirm('Zkopírovat všechny stávající smlouvy do návrhu? Stávající návrh bude přepsán.')) return;
-        state.proposedContracts = state.currentContracts.map(c => {
-            const copy = clone(c); copy.id = uid(); return copy;
-        });
-        save(); renderContractsGroup('proposed'); renderKPIs();
-        toast('Stávající portfolio zkopírováno do návrhu', 'success');
+        save();
+        renderContractsGroup(which);
+        renderKPIs();
     }
 
-    /* ════════════ EDIT CONTRACT MODAL ════════════ */
+    function copyFromCurrent() {
+        if (!confirm('Zkopírovat VŠECHNY stávající smlouvy do návrhu? Stávající návrh bude přepsán.')) return;
+        state.proposedContracts = state.currentContracts.map(c => {
+            const copy = clone(c);
+            copy.id = uid();
+            copy.proposalStatus = 'kept';
+            return copy;
+        });
+        save();
+        renderContractsGroup('proposed');
+        renderKPIs();
+        toast('Všechny stávající smlouvy zkopírovány do návrhu', 'success');
+    }
+
+    function copyKeptFromCurrent() {
+        const kept = state.currentContracts.filter(c => c.actionStatus === 'keep' || c.actionStatus === 'modify');
+        if (!kept.length) {
+            toast('Ve stávajícím portfoliu není žádná smlouva označena jako Ponechat nebo Upravit.', 'info');
+            return;
+        }
+        const existingNos = new Set(state.proposedContracts.map(c => (c.contractNo || '').trim()).filter(Boolean));
+        let added = 0;
+        kept.forEach(c => {
+            if (c.contractNo && existingNos.has(c.contractNo.trim())) return;
+            const copy = clone(c);
+            copy.id = uid();
+            copy.proposalStatus = c.actionStatus === 'modify' ? 'modified' : 'kept';
+            state.proposedContracts.push(copy);
+            added++;
+        });
+        save();
+        renderContractsGroup('proposed');
+        renderKPIs();
+        toast(`Do návrhu přeneseno ${added} ponechaných smluv`, 'success');
+    }
+
+    /* ════════════ EDIT CONTRACT MODAL (32 KATEGORIÍ V 6 SKUPINÁCH) ════════════ */
     let editingCtx = null;
 
     function editContract(which, id) {
@@ -446,120 +941,176 @@
         if (!c) return;
         editingCtx = { which, id };
         document.getElementById('contractModalTitle').textContent =
-            (which === 'current' ? 'Stávající smlouva — ' : 'Návrh smlouvy — ') + (c.insurer || 'Nová');
+            (which === 'current' ? 'Stávající smlouva — ' : 'Smlouva v návrhu — ') + (c.insurer || 'Nová položka');
 
         const body = document.getElementById('contractModalBody');
-        const insurerOptions = D.INSURER_NAMES.map(n =>
-            `<option value="${escapeHtml(n)}" ${c.insurer === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('');
+        const insurerOptions = D.INSURERS.map(ins =>
+            `<option value="${escapeHtml(ins.name)}" ${c.insurer === ins.name ? 'selected' : ''}>${escapeHtml(ins.name)} (${escapeHtml(ins.productLine)})</option>`).join('');
         const clientOptions = state.clients.map(cl =>
             `<option value="${cl.id}" ${c.clientId === cl.id ? 'selected' : ''}>${escapeHtml(cl.name)}</option>`).join('');
+        const actionsList = D.CONTRACT_ACTIONS[which] || [];
+        const curStatus = which === 'current' ? (c.actionStatus || 'keep') : (c.proposalStatus || 'new');
+        const cond = c.conditions || {};
+
+        const groupedInputsHtml = D.CATEGORY_GROUPS.map(grp => {
+            const cats = D.CATEGORIES.filter(cat => cat.group === grp.key);
+            return `
+                <div class="p-3 rounded border border-slate-800 bg-slate-950/50 mb-3">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="badge badge-${grp.color}">${escapeHtml(grp.label)}</span>
+                        ${grp.key === 'disability' ? `
+                            <button type="button" onclick="app.copyInv3ToAll()" class="text-[10px] text-sky-400 hover:underline font-mono">
+                                ↳ Zkopírovat částku Inv. III do Inv. II a Inv. I
+                            </button>` : ''}
+                    </div>
+                    <div class="ins-grid">
+                        ${cats.map(cat => {
+                            const unit = cat.kind === 'daily' ? '(Kč/den)' : cat.kind === 'monthly' ? '(Kč/měs)' : '(Kč)';
+                            const step = cat.kind === 'daily' ? 50 : cat.kind === 'monthly' ? 500 : 50000;
+                            return `
+                                <label title="${escapeHtml(cat.help)}">
+                                    <span>${escapeHtml(cat.label)} <strong class="text-slate-500">${unit}</strong></span>
+                                    <input type="number" class="pro-input" min="0" step="${step}"
+                                        id="mod_item_${cat.key}" value="${num(c.items && c.items[cat.key])}">
+                                </label>`;
+                        }).join('')}
+                    </div>
+                </div>`;
+        }).join('');
 
         body.innerHTML = `
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                 <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Osoba</span>
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Pojištěná osoba</span>
                     <select class="pro-input" id="mod_client">${clientOptions}</select>
                 </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Pojišťovna</span>
+                <label class="block lg:col-span-2">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Pojišťovna a produktová řada</span>
                     <select class="pro-input" id="mod_insurer">
-                        <option value="">-- vyberte --</option>
+                        <option value="">-- vyberte pojišťovnu --</option>
                         ${insurerOptions}
-                        <option value="OTHER" ${c.insurer && !D.INSURER_NAMES.includes(c.insurer) ? 'selected' : ''}>Jiná…</option>
+                        <option value="OTHER" ${c.insurer && !D.INSURER_NAMES.includes(c.insurer) ? 'selected' : ''}>Jiná pojišťovna…</option>
                     </select>
                 </label>
                 <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Číslo smlouvy</span>
-                    <input type="text" class="pro-input" id="mod_contractNo" value="${escapeHtml(c.contractNo || '')}">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Číslo smlouvy / označení</span>
+                    <input type="text" class="pro-input" id="mod_contractNo" value="${escapeHtml(c.contractNo || '')}" placeholder="např. 1317491203">
                 </label>
                 <label class="block" id="mod_otherInsurerWrap" style="display:${(c.insurer && !D.INSURER_NAMES.includes(c.insurer)) ? 'block' : 'none'}">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Jiná pojišťovna — název</span>
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Jiná pojišťovna — název</span>
                     <input type="text" class="pro-input" id="mod_otherInsurer" value="${escapeHtml(c.insurer && !D.INSURER_NAMES.includes(c.insurer) ? c.insurer : '')}">
                 </label>
                 <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Počátek (rok)</span>
-                    <input type="number" class="pro-input" id="mod_start" min="1900" max="2100" value="${c.start || ''}">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Počátek / Konec (rok)</span>
+                    <div class="flex gap-1.5">
+                        <input type="number" class="pro-input" id="mod_start" min="1980" max="2060" placeholder="Od" value="${c.start || ''}">
+                        <input type="number" class="pro-input" id="mod_end" min="2020" max="2100" placeholder="Do" value="${c.end || ''}">
+                    </div>
                 </label>
                 <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Konec (rok)</span>
-                    <input type="number" class="pro-input" id="mod_end" min="1900" max="2100" value="${c.end || ''}">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Pojistné (Kč) & Frekvence</span>
+                    <div class="flex gap-1.5">
+                        <input type="number" class="pro-input" id="mod_premium" min="0" step="10" value="${c.premium || 0}">
+                        <select class="pro-input" id="mod_freq" style="width:110px">
+                            <option value="monthly"   ${cond.paymentFrequency === 'monthly' || !cond.paymentFrequency ? 'selected' : ''}>Měsíčně</option>
+                            <option value="quarterly" ${cond.paymentFrequency === 'quarterly' ? 'selected' : ''}>Čtvrtletně</option>
+                            <option value="yearly"    ${cond.paymentFrequency === 'yearly' ? 'selected' : ''}>Ročně</option>
+                            <option value="singlepay" ${cond.paymentFrequency === 'singlepay' ? 'selected' : ''}>Jednoráz.</option>
+                        </select>
+                    </div>
                 </label>
                 <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Platba</span>
-                    <input type="number" class="pro-input" id="mod_premium" min="0" step="1" value="${c.premium || 0}">
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Frekvence</span>
-                    <select class="pro-input" id="mod_freq">
-                        <option value="monthly"   ${(c.conditions && c.conditions.paymentFrequency) === 'monthly' || !(c.conditions && c.conditions.paymentFrequency) ? 'selected' : ''}>Měsíčně</option>
-                        <option value="quarterly" ${(c.conditions && c.conditions.paymentFrequency) === 'quarterly' ? 'selected' : ''}>Čtvrtletně</option>
-                        <option value="yearly"    ${(c.conditions && c.conditions.paymentFrequency) === 'yearly' ? 'selected' : ''}>Ročně</option>
-                        <option value="singlepay" ${(c.conditions && c.conditions.paymentFrequency) === 'singlepay' ? 'selected' : ''}>Jednorázově</option>
+                    <span class="block text-[10px] uppercase tracking-wide text-sky-400 font-bold mb-1">Doporučení poradce ke smlouvě</span>
+                    <select class="pro-input" id="mod_actionStatus">
+                        ${actionsList.map(a => `<option value="${a.key}" ${curStatus === a.key ? 'selected' : ''}>${escapeHtml(a.label)}</option>`).join('')}
                     </select>
                 </label>
-            </div>
-
-            <h4 class="text-xs font-bold uppercase text-slate-400 mb-2 flex items-center gap-2">
-                <i data-lucide="layers" class="w-3.5 h-3.5"></i>Pojistné krytí
-            </h4>
-            <div class="ins-grid mb-4">
-                ${D.CATEGORIES.map(cat => `
-                    <label title="${escapeHtml(cat.help)}">
-                        <span>${escapeHtml(cat.label)} ${cat.kind === 'daily' ? '(Kč/den)' : '(Kč)'}</span>
-                        <input type="number" class="pro-input" min="0" step="${cat.kind === 'daily' ? 10 : 1000}"
-                            id="mod_item_${cat.key}" value="${num(c.items && c.items[cat.key])}">
-                    </label>
-                `).join('')}
-            </div>
-
-            <h4 class="text-xs font-bold uppercase text-slate-400 mb-2 flex items-center gap-2">
-                <i data-lucide="settings-2" class="w-3.5 h-3.5"></i>Podmínky a klauzule
-            </h4>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
                 <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">PN — plnění od (den)</span>
-                    <select class="pro-input" id="mod_pnFromDay">
-                        <option value="1"  ${(c.conditions && c.conditions.pnFromDay) === 1 ? 'selected' : ''}>Od 1. dne</option>
-                        <option value="15" ${(c.conditions && c.conditions.pnFromDay) === 15 ? 'selected' : ''}>Od 15. dne</option>
-                        <option value="22" ${(c.conditions && c.conditions.pnFromDay) === 22 ? 'selected' : ''}>Od 22. dne</option>
-                        <option value="29" ${(c.conditions && c.conditions.pnFromDay) === 29 || !(c.conditions && c.conditions.pnFromDay) ? 'selected' : ''}>Od 29. dne</option>
-                        <option value="61" ${(c.conditions && c.conditions.pnFromDay) === 61 ? 'selected' : ''}>Od 61. dne</option>
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Typ produktu</span>
+                    <select class="pro-input" id="mod_contractType">
+                        <option value="risk"     ${cond.contractType === 'risk' || !cond.contractType ? 'selected' : ''}>Rizikové ŽP (RŽP)</option>
+                        <option value="invest"   ${cond.contractType === 'invest' ? 'selected' : ''}>Investiční ŽP (IŽP)</option>
+                        <option value="capital"  ${cond.contractType === 'capital' ? 'selected' : ''}>Kapitálové ŽP (KŽP)</option>
+                        <option value="accident" ${cond.contractType === 'accident' ? 'selected' : ''}>Samostatné úrazové</option>
                     </select>
                 </label>
-                <label class="flex items-center gap-2 text-xs text-slate-300 mt-5">
-                    <input type="checkbox" class="pro-input" id="mod_pnRetroactive" ${(c.conditions && c.conditions.pnRetroactive) ? 'checked' : ''}>
-                    <span>PN <strong>zpětně</strong> od 1. dne (při delším trvání)</span>
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Hospitalizace — čekací (dny)</span>
-                    <input type="number" class="pro-input" id="mod_hospWaiting" min="0" max="60" value="${(c.conditions && c.conditions.hospWaitingDays) || 0}">
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">ZO — čekací doba (měsíce)</span>
-                    <input type="number" class="pro-input" id="mod_zoWaiting" min="0" max="12" value="${(c.conditions && c.conditions.criticalIllnessWaitingMonths) || 3}">
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Riziková skupina (povolání)</span>
-                    <input type="text" class="pro-input" id="mod_occCat" placeholder="např. 1, 2, 3, 4"
-                        value="${escapeHtml((c.conditions && c.conditions.occupationCategory) || '')}">
-                </label>
-                <label class="block md:col-span-3">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Poznámka</span>
-                    <textarea class="pro-input" id="mod_note" rows="2"
-                        placeholder="Zvláštnosti smlouvy, výluky, čekací doby specifické…">${escapeHtml(c.note || '')}</textarea>
+                <label class="block md:col-span-2 lg:col-span-4">
+                    <span class="block text-[10px] uppercase tracking-wide text-amber-400 font-bold mb-1">Zdůvodnění doporučení poradce u této smlouvy (zobrazí se i v tisku pro klienta)</span>
+                    <input type="text" class="pro-input" id="mod_actionReason"
+                        placeholder="např. Ponechat z důvodu prodělaného kardiologického vyšetření v r. 2021 – nová smlouva by měla výluku…"
+                        value="${escapeHtml(c.actionReason || c.note || '')}">
                 </label>
             </div>
 
-            <div class="flex justify-between items-center gap-2 mt-4">
-                <button onclick="app.applyInsurerDefaults()" class="btn-secondary" title="Předvyplnit výchozí podmínky podle pojišťovny">
-                    <i data-lucide="zap" class="w-3.5 h-3.5"></i>Předvyplnit dle pojišťovny
+            <div class="flex items-center justify-between mb-2">
+                <h4 class="text-xs font-bold uppercase text-slate-300 flex items-center gap-2">
+                    <i data-lucide="layers" class="w-3.5 h-3.5 text-sky-400"></i>
+                    Sjednaná pojistná rizika (32 kategorií dle skupin)
+                </h4>
+                <button type="button" onclick="app.applyInsurerDefaults()" class="btn-secondary">
+                    <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i>Předvyplnit podmínky dle pojišťovny
                 </button>
-                <div class="flex gap-2">
-                    <button onclick="app.closeContractModal()" class="btn-secondary">Zrušit</button>
-                    <button onclick="app.saveContractModal()" class="btn-primary">
-                        <i data-lucide="save" class="w-3.5 h-3.5"></i>Uložit
-                    </button>
-                </div>
+            </div>
+
+            ${groupedInputsHtml}
+
+            <h4 class="text-xs font-bold uppercase text-slate-300 mb-2 mt-4 flex items-center gap-2">
+                <i data-lucide="settings-2" class="w-3.5 h-3.5 text-violet-400"></i>
+                Detailní podmínky smlouvy, progrese a daňové benefity
+            </h4>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-3 rounded border border-slate-800 bg-slate-950/50 mb-4">
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Progrese u trvalých následků (TN)</span>
+                    <select class="pro-input" id="mod_tnProg">
+                        <option value="100"  ${num(cond.tnProgression) === 100 ? 'selected' : ''}>100 % (bez progrese / lineární)</option>
+                        <option value="400"  ${num(cond.tnProgression) === 400 ? 'selected' : ''}>400 % (4násobek u vážných TN)</option>
+                        <option value="500"  ${num(cond.tnProgression) === 500 ? 'selected' : ''}>500 % (5násobek)</option>
+                        <option value="600"  ${num(cond.tnProgression) === 600 ? 'selected' : ''}>600 % (6násobek)</option>
+                        <option value="800"  ${num(cond.tnProgression) === 800 || !cond.tnProgression ? 'selected' : ''}>800 % (8násobek — KOOP/ALZ/NN)</option>
+                        <option value="1000" ${num(cond.tnProgression) === 1000 ? 'selected' : ''}>1000 % (10násobek — UNI/GČP/SIM/MET)</option>
+                    </select>
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">PN — karenční doba (plnění od dne)</span>
+                    <select class="pro-input" id="mod_pnFromDay">
+                        <option value="1"  ${num(cond.pnFromDay) === 1 ? 'selected' : ''}>Od 1. dne</option>
+                        <option value="15" ${num(cond.pnFromDay) === 15 ? 'selected' : ''}>Od 15. dne</option>
+                        <option value="22" ${num(cond.pnFromDay) === 22 ? 'selected' : ''}>Od 22. dne</option>
+                        <option value="29" ${num(cond.pnFromDay) === 29 || !cond.pnFromDay ? 'selected' : ''}>Od 29. dne</option>
+                        <option value="61" ${num(cond.pnFromDay) === 61 ? 'selected' : ''}>Od 61. dne</option>
+                    </select>
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Příspěvek zaměstnavatele (Kč/měs)</span>
+                    <input type="number" class="pro-input" id="mod_empContrib" min="0" step="100" value="${num(cond.employerContribution)}">
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Daňově uznatelné (LTC/spoř. Kč/rok)</span>
+                    <input type="number" class="pro-input" id="mod_taxDeduct" min="0" step="1000" value="${num(cond.taxDeductibleAnnual)}">
+                </label>
+                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input type="checkbox" class="pro-input" id="mod_pnRetroactive" ${cond.pnRetroactive ? 'checked' : ''}>
+                    <span>PN <strong>zpětně od 1. dne</strong></span>
+                </label>
+                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input type="checkbox" class="pro-input" id="mod_invPsych" ${cond.invPsychIncluded !== false ? 'checked' : ''}>
+                    <span>Kryje <strong>psychické dg. (F)</strong> v invaliditě</span>
+                </label>
+                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input type="checkbox" class="pro-input" id="mod_backPain" ${cond.backPainIncluded ? 'checked' : ''}>
+                    <span>Rozšířené krytí <strong>páteře / zad</strong></span>
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Riziková skupina povolání</span>
+                    <input type="text" class="pro-input" id="mod_occCat" placeholder="např. RS 1" value="${escapeHtml(cond.occupationCategory || '1')}">
+                </label>
+            </div>
+
+            <div class="flex justify-end items-center gap-2 mt-4">
+                <button type="button" onclick="app.closeContractModal()" class="btn-secondary">Zrušit</button>
+                <button type="button" onclick="app.saveContractModal()" class="btn-primary">
+                    <i data-lucide="save" class="w-3.5 h-3.5"></i>Uložit smlouvu
+                </button>
             </div>
         `;
         document.getElementById('contractModal').classList.remove('hidden');
@@ -569,23 +1120,39 @@
         });
         if (window.lucide) lucide.createIcons();
     }
+
+    function copyInv3ToAll() {
+        const el3 = document.getElementById('mod_item_invalidita');
+        const el2 = document.getElementById('mod_item_inv2');
+        const el1 = document.getElementById('mod_item_inv1');
+        if (!el3) return;
+        const v = num(el3.value);
+        if (el2) el2.value = v;
+        if (el1) el1.value = Math.round(v * 0.5);
+        toast('Invalidita II nastavena na 100 % a Inv. I na 50 % částky Inv. III', 'info');
+    }
+
     function closeContractModal() {
         document.getElementById('contractModal').classList.add('hidden');
         document.getElementById('contractModal').classList.remove('flex');
         editingCtx = null;
     }
+
     function applyInsurerDefaults() {
         const insurerName = document.getElementById('mod_insurer').value;
         const ins = D.INSURERS.find(i => i.name === insurerName);
-        if (!ins) { toast('Vyberte pojišťovnu', 'info'); return; }
-        const d = ins.defaultConditions;
-        if (d.pnWaitingDays) document.getElementById('mod_pnFromDay').value = String(d.pnWaitingDays);
+        if (!ins) { toast('Nejprve vyberte pojišťovnu ze seznamu', 'info'); return; }
+        const d = ins.defaultConditions || {};
+        if (d.pnFromDay) document.getElementById('mod_pnFromDay').value = String(d.pnFromDay);
+        if (d.tnProgression) document.getElementById('mod_tnProg').value = String(d.tnProgression);
+        if (d.contractType) document.getElementById('mod_contractType').value = d.contractType;
         document.getElementById('mod_pnRetroactive').checked = !!d.pnRetroactive;
-        document.getElementById('mod_hospWaiting').value = d.hospWaitingDays || 0;
-        document.getElementById('mod_zoWaiting').value = d.criticalIllnessWaitingMonths || 3;
-        document.getElementById('mod_occCat').value = d.occupationCategories || '';
-        toast('Výchozí podmínky předvyplněny', 'success');
+        document.getElementById('mod_invPsych').checked = d.invPsychIncluded !== false;
+        document.getElementById('mod_backPain').checked = !!d.backPainIncluded;
+        document.getElementById('mod_occCat').value = d.occupationCategories || '1';
+        toast(`Podmínky předvyplněny dle ${ins.name} (${ins.productLine})`, 'success');
     }
+
     function saveContractModal() {
         if (!editingCtx) return;
         const { which, id } = editingCtx;
@@ -601,61 +1168,365 @@
         c.start = num(document.getElementById('mod_start').value) || null;
         c.end   = num(document.getElementById('mod_end').value) || null;
         c.premium = num(document.getElementById('mod_premium').value);
-        c.note = document.getElementById('mod_note').value.trim();
+
+        const st = document.getElementById('mod_actionStatus').value;
+        if (which === 'current') c.actionStatus = st;
+        else c.proposalStatus = st;
+
+        const reason = document.getElementById('mod_actionReason').value.trim();
+        c.actionReason = reason;
+        c.note = reason;
+
         c.conditions = c.conditions || {};
+        c.conditions.contractType = document.getElementById('mod_contractType').value;
         c.conditions.paymentFrequency = document.getElementById('mod_freq').value;
+        c.conditions.tnProgression = num(document.getElementById('mod_tnProg').value) || 800;
         c.conditions.pnFromDay = num(document.getElementById('mod_pnFromDay').value) || 29;
         c.conditions.pnWaitingDays = c.conditions.pnFromDay;
         c.conditions.pnRetroactive = document.getElementById('mod_pnRetroactive').checked;
-        c.conditions.hospWaitingDays = num(document.getElementById('mod_hospWaiting').value);
-        c.conditions.criticalIllnessWaitingMonths = num(document.getElementById('mod_zoWaiting').value);
+        c.conditions.invPsychIncluded = document.getElementById('mod_invPsych').checked;
+        c.conditions.backPainIncluded = document.getElementById('mod_backPain').checked;
         c.conditions.occupationCategory = document.getElementById('mod_occCat').value.trim();
+        c.conditions.employerContribution = num(document.getElementById('mod_empContrib').value);
+        c.conditions.taxDeductibleAnnual = num(document.getElementById('mod_taxDeduct').value);
 
         c.items = c.items || {};
         D.CATEGORIES.forEach(cat => {
-            c.items[cat.key] = num(document.getElementById('mod_item_' + cat.key).value);
+            const el = document.getElementById('mod_item_' + cat.key);
+            if (el) c.items[cat.key] = num(el.value);
         });
+
         save();
         closeContractModal();
         renderContractsGroup(which);
         renderKPIs();
-        toast('Uloženo', 'success');
+        toast('Smlouva uložena', 'success');
+    }
+
+    /* ════════════ TAB 4: NEEDS ANALYSIS & TAX BENEFIT CALCULATOR ════════════ */
+    function refreshNeedsPersonSelect() {
+        const sel = document.getElementById('needsPersonSelect');
+        if (!sel) return;
+        const cur = sel.value;
+        sel.innerHTML = state.clients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+        if (cur && state.clients.find(c => c.id === cur)) sel.value = cur;
+        else if (state.clients[0]) sel.value = state.clients[0].id;
+    }
+
+    function getNeedsOpts() {
+        return {
+            deathYears: document.getElementById('needsDeathYears') ? document.getElementById('needsDeathYears').value : 2,
+            invYears:   document.getElementById('needsInvYears') ? document.getElementById('needsInvYears').value : '10',
+            zoMonths:   document.getElementById('needsZoMonths') ? document.getElementById('needsZoMonths').value : 12,
+            pnTargetPct:document.getElementById('needsPnTargetPct') ? document.getElementById('needsPnTargetPct').value : 0.90
+        };
+    }
+
+    function renderNeedsAnalysis() {
+        const out = document.getElementById('needsAnalysisOutput');
+        if (!out) return;
+        if (!state.clients.length) {
+            out.innerHTML = '<div class="text-xs text-slate-500 italic">Nejprve přidejte pojištěnou osobu.</div>';
+            return;
+        }
+        refreshNeedsPersonSelect();
+        const pid = document.getElementById('needsPersonSelect').value;
+        const person = state.clients.find(c => c.id === pid) || state.clients[0];
+        const needs = computeRecommendedNeeds(person, getNeedsOpts());
+        const t = needs.targets;
+
+        const rowsData = [
+            {
+                label: 'Smrt celkem (konstantní + klesající k úvěru)',
+                sub: needs.isChild ? 'U dětí se smrt nesjednává' : `Úvěry ${fmtCZK(needs.loans)} + rodinná rezerva ${fmtCZK(t.smrtConst)}`,
+                target: t.smrtTotal,
+                cur: effectiveDeathCover(state.currentContracts, person.id),
+                nw:  effectiveDeathCover(state.proposedContracts, person.id),
+                unit: 'sum'
+            },
+            {
+                label: 'Invalidita III. stupně (vč. klesající / dětské soběstačnosti)',
+                sub: needs.isChild ? 'Kritické riziko u dětí (vrozené a získané vady / ZTP)' : `Státní ID III. st.: ${fmtCZK(needs.pens.inv3)}/m → chybí ${fmtCZK(needs.gapInv3Monthly)}/m`,
+                target: t.inv3,
+                cur: effectiveInv3Cover(state.currentContracts, person.id) + sumItemFor(state.currentContracts, person.id, 'trvaleNasledkyNemoc'),
+                nw:  effectiveInv3Cover(state.proposedContracts, person.id) + sumItemFor(state.proposedContracts, person.id, 'trvaleNasledkyNemoc'),
+                unit: 'sum'
+            },
+            {
+                label: 'Invalidita II. stupně',
+                sub: needs.isChild ? 'Středně těžká závislost / invalidita' : `Státní ID II. st.: ${fmtCZK(needs.pens.inv2)}/m → chybí ${fmtCZK(needs.gapInv2Monthly)}/m`,
+                target: t.inv2,
+                cur: effectiveInv2Cover(state.currentContracts, person.id),
+                nw:  effectiveInv2Cover(state.proposedContracts, person.id),
+                unit: 'sum'
+            },
+            {
+                label: 'Invalidita I. stupně',
+                sub: needs.isChild ? 'Částečná invalidita v dospělosti' : `Státní ID I. st.: ${fmtCZK(needs.pens.inv1)}/m → nejčastější stupeň invalidity`,
+                target: t.inv1,
+                cur: effectiveInv1Cover(state.currentContracts, person.id),
+                nw:  effectiveInv1Cover(state.proposedContracts, person.id),
+                unit: 'sum'
+            },
+            {
+                label: 'Závažná onemocnění (ZO)',
+                sub: needs.isChild ? 'Náklady na léčbu a celodenní péči rodiče' : 'Finanční polštář na 1–2 roky léčby a rekonvalescence',
+                target: t.zavOn,
+                cur: effectiveZoCover(state.currentContracts, person.id),
+                nw:  effectiveZoCover(state.proposedContracts, person.id),
+                unit: 'sum'
+            },
+            {
+                label: 'Trvalé následky úrazu (základ + od 10 % před progresí)',
+                sub: 'S progresí 800–1000 % vytvoří při 100% poškození až 8–10 mil. Kč',
+                target: t.tnUraz + t.tnUraz10,
+                cur: effectiveTnCover(state.currentContracts, person.id),
+                nw:  effectiveTnCover(state.proposedContracts, person.id),
+                unit: 'sum'
+            },
+            {
+                label: 'Pracovní neschopnost (součet denních dávek PN)',
+                sub: needs.isChild ? 'U dětí nahrazeno Ošetřováním dítěte (OČR)' : `Nemocenská ČSSZ: ${fmtCZK(needs.sickMonthly)}/m → dorovnání propadu příjmu`,
+                target: t.pnDaily,
+                cur: effectivePnDaily(state.currentContracts, person.id),
+                nw:  effectivePnDaily(state.proposedContracts, person.id),
+                unit: 'daily'
+            },
+            {
+                label: 'Hospitalizace (nemoc + úraz)',
+                sub: 'Pokrytí nadstandardního pokoje a vedlejších nákladů v nemocnici',
+                target: t.hosp,
+                cur: sumItemFor(state.currentContracts, person.id, 'hosp') + sumItemFor(state.currentContracts, person.id, 'hospUraz'),
+                nw:  sumItemFor(state.proposedContracts, person.id, 'hosp') + sumItemFor(state.proposedContracts, person.id, 'hospUraz'),
+                unit: 'daily'
+            },
+            {
+                label: 'Ošetřování dítěte / člena rodiny (OČR)',
+                sub: 'Kompenzace propadu příjmu rodiče při péči o nemocné dítě doma',
+                target: t.osetrovani,
+                cur: sumItemFor(state.currentContracts, person.id, 'osetrovani'),
+                nw:  sumItemFor(state.proposedContracts, person.id, 'osetrovani'),
+                unit: 'daily'
+            }
+        ];
+
+        const fmtVal = (v, u) => u === 'daily' ? (v ? v + ' Kč/d' : '0 Kč/d') : fmtCZK(v);
+
+        out.innerHTML = `
+            <div class="overflow-x-auto">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Pilíř pojistné ochrany (${escapeHtml(person.name)})</th>
+                            <th class="num">Doporučený cíl</th>
+                            <th class="num">Stávající stav</th>
+                            <th class="num">Návrh poradce</th>
+                            <th class="num">Naplnění cíle v Návrhu</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rowsData.map(r => {
+                            if (r.target === 0 && r.cur === 0 && r.nw === 0) return '';
+                            const pctCur = r.target > 0 ? Math.min(100, Math.round((r.cur / r.target) * 100)) : 100;
+                            const pctNew = r.target > 0 ? Math.min(100, Math.round((r.nw  / r.target) * 100)) : 100;
+                            const badgeCls = pctNew >= 90 ? 'emerald' : pctNew >= 50 ? 'amber' : 'rose';
+                            const statusText = pctNew >= 90 ? '✔ Plně kryto' : pctNew >= 50 ? '◐ Částečně' : '✖ Podpojištěno';
+                            return `
+                                <tr>
+                                    <td>
+                                        <div class="font-semibold text-slate-200">${escapeHtml(r.label)}</div>
+                                        <div class="text-[10px] text-slate-500">${escapeHtml(r.sub)}</div>
+                                    </td>
+                                    <td class="num font-bold text-amber-300">${fmtVal(r.target, r.unit)}</td>
+                                    <td class="num text-slate-400">${fmtVal(r.cur, r.unit)} <span class="text-[10px] text-slate-500">(${pctCur} %)</span></td>
+                                    <td class="num font-bold text-sky-300">${fmtVal(r.nw, r.unit)}</td>
+                                    <td class="num">
+                                        <div class="flex items-center justify-end gap-2">
+                                            <span class="badge badge-${badgeCls}">${pctNew} % · ${statusText}</span>
+                                        </div>
+                                    </td>
+                                </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    function applyNeedsToProposal() {
+        const pid = document.getElementById('needsPersonSelect') ? document.getElementById('needsPersonSelect').value : (state.clients[0] && state.clients[0].id);
+        const person = state.clients.find(c => c.id === pid);
+        if (!person) return;
+        const needs = computeRecommendedNeeds(person, getNeedsOpts());
+        const t = needs.targets;
+
+        /* Zjistíme, kolik už kryjí zachované ('kept') smlouvy v návrhu pro tuto osobu */
+        const keptInProp = state.proposedContracts.filter(c => c.clientId === person.id && c.proposalStatus === 'kept');
+        const keptSmrt = effectiveDeathCover(keptInProp, person.id);
+        const keptZo   = effectiveZoCover(keptInProp, person.id);
+
+        /* Najdeme nebo vytvoříme novou ('new') smlouvu v návrhu pro tuto osobu */
+        let targetContract = state.proposedContracts.find(c => c.clientId === person.id && c.proposalStatus === 'new');
+        if (!targetContract) {
+            targetContract = emptyContract(person.id, 'proposed');
+            targetContract.insurer = 'Uniqa';
+            targetContract.contractNo = 'NÁVRH-' + new Date().getFullYear();
+            targetContract.proposalStatus = 'new';
+            targetContract.conditions.tnProgression = 1000;
+            targetContract.conditions.pnRetroactive = true;
+            state.proposedContracts.push(targetContract);
+        }
+
+        if (needs.isChild) {
+            targetContract.items.invalidita = t.inv3;
+            targetContract.items.trvaleNasledkyNemoc = t.trvaleNasledkyNemoc;
+            targetContract.items.zavOn = Math.max(0, t.zavOn - keptZo);
+            targetContract.items.tnUraz = t.tnUraz;
+            targetContract.items.uraz = t.uraz;
+            targetContract.items.hosp = t.hosp;
+            targetContract.items.osetrovani = t.osetrovani;
+            targetContract.actionReason = `Automaticky namodelováno dle kalkulačky potřeb pro dítě (${person.name}).`;
+        } else {
+            targetContract.items.smrt = Math.max(100000, t.smrtConst - keptSmrt);
+            targetContract.items.smrtKles = t.smrtKles;
+            targetContract.items.invalidita = t.inv3;
+            targetContract.items.inv2 = t.inv2;
+            targetContract.items.inv1 = t.inv1;
+            targetContract.items.zavOn = Math.max(0, t.zavOn - keptZo);
+            targetContract.items.tnUraz = t.tnUraz;
+            targetContract.items.tnUraz10 = t.tnUraz10;
+            targetContract.items.pn28 = t.pnDaily;
+            targetContract.items.hosp = t.hosp;
+            targetContract.items.uraz = t.uraz;
+            targetContract.actionReason = `Namodelováno dle kalkulačky potřeb: krytí úvěrů (${fmtCZK(needs.loans)}), invalidity I.–III. st. a propadu příjmu.`;
+        }
+        targetContract.note = targetContract.actionReason;
+
+        save();
+        renderAll();
+        renderNeedsAnalysis();
+        toast(`Doporučené částky propsány do návrhu pro: ${person.name}`, 'success');
+    }
+
+    function renderTaxBenefitCalculator() {
+        const el = document.getElementById('taxBenefitCalculator');
+        if (!el) return;
+        const totalPropM = totalPremiumMonthly(state.proposedContracts);
+        const empFromContractsM = totalEmployerBenefitMonthly(state.proposedContracts);
+        const taxDedFromContractsY = state.proposedContracts.reduce((s, c) => s + num(c.conditions && c.conditions.taxDeductibleAnnual), 0);
+        /* + připojištění dlouhodobé péče (LTC) je daňově uznatelné */
+        const hasLtc = sumItem(state.proposedContracts, 'dlouhodobaPece') > 0;
+        const defaultDedY = taxDedFromContractsY > 0 ? taxDedFromContractsY : (hasLtc ? 12000 : 0);
+
+        el.innerHTML = `
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Měsíční pojistné návrhu (Kč/měs)</span>
+                    <input type="number" id="taxSimPremiumM" class="pro-input" value="${Math.round(totalPropM)}" oninput="app.updateTaxSim()">
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Příspěvek zaměstnavatele (Kč/měs)</span>
+                    <input type="number" id="taxSimEmployerM" class="pro-input" value="${Math.round(empFromContractsM || 500)}" min="0" max="4166" step="100" oninput="app.updateTaxSim()">
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Roční daňově uznatelné pojistné (LTC/ŽP)</span>
+                    <input type="number" id="taxSimDeductibleY" class="pro-input" value="${Math.round(defaultDedY || 12000)}" min="0" max="48000" step="1000" oninput="app.updateTaxSim()">
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Sazba daně z příjmu klienta</span>
+                    <select id="taxSimRate" class="pro-input" onchange="app.updateTaxSim()">
+                        <option value="0.15" selected>15 % (základní sazba do 146 901 Kč/měs)</option>
+                        <option value="0.23">23 % (progresivní sazba nad 146 901 Kč/měs)</option>
+                    </select>
+                </label>
+            </div>
+            <div id="taxSimResult" class="mt-3"></div>
+        `;
+        updateTaxSim();
+    }
+
+    function updateTaxSim() {
+        const resEl = document.getElementById('taxSimResult');
+        if (!resEl) return;
+        const premM = num(document.getElementById('taxSimPremiumM').value);
+        const empM  = Math.min(4166, num(document.getElementById('taxSimEmployerM').value));
+        const dedY  = Math.min(48000, num(document.getElementById('taxSimDeductibleY').value));
+        const rate  = num(document.getElementById('taxSimRate').value) || 0.15;
+
+        const taxSavingY = Math.round(dedY * rate);
+        const taxSavingM = Math.round(taxSavingY / 12);
+        const netClientCostM = Math.max(0, Math.round(premM - empM - taxSavingM));
+        const totalSubsidyM = Math.min(premM, empM + taxSavingM);
+
+        resEl.innerHTML = `
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div class="kpi-card">
+                    <div class="text-[10px] uppercase text-slate-500 font-bold">Hrubé pojistné návrhu</div>
+                    <div class="text-lg font-bold font-mono text-slate-200">${fmtCZK(premM)} / měs</div>
+                    <div class="text-[10px] text-slate-500">${fmtCZK(premM * 12)} / rok</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="text-[10px] uppercase text-slate-500 font-bold">Příspěvek zaměstnavatele</div>
+                    <div class="text-lg font-bold font-mono text-sky-300">-${fmtCZK(empM)} / měs</div>
+                    <div class="text-[10px] text-slate-500">${fmtCZK(empM * 12)} / rok (osvobozeno do 50 000 Kč)</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="text-[10px] uppercase text-slate-500 font-bold">Daňová vratka (odpočet ${fmtCZK(dedY)}/r)</div>
+                    <div class="text-lg font-bold font-mono text-amber-300">-${fmtCZK(taxSavingM)} / měs</div>
+                    <div class="text-[10px] text-slate-500">Úspora na dani ${fmtCZK(taxSavingY)} / rok</div>
+                </div>
+                <div class="kpi-card border-emerald-500/40">
+                    <div class="text-[10px] uppercase text-emerald-400 font-bold">Skutečný čistý náklad klienta</div>
+                    <div class="text-xl font-bold font-mono text-emerald-300">${fmtCZK(netClientCostM)} / měs</div>
+                    <div class="text-[10px] text-emerald-400/80">Dotace zaměstnavatele a státu: ${fmtCZK(totalSubsidyM)}/měs</div>
+                </div>
+            </div>
+        `;
     }
 
     /* ════════════ LOANS ════════════ */
     function renderLoans() {
         const container = document.getElementById('loansList');
+        if (!container) return;
         if (!state.loans.length) {
             container.innerHTML = `<div class="text-xs text-slate-500 italic text-center py-6 border border-dashed border-slate-800 rounded">
-                Žádné úvěry. Přidejte hypotéku, půjčku od rodičů, spotřebitelský úvěr…
+                Žádné úvěry. Přidejte hypotéku, půjčku od rodiny nebo spotřebitelský úvěr…
             </div>`;
             updateLoansTotals();
             return;
         }
-        const clientOpts = state.clients.map(c =>
-            `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
         container.innerHTML = state.loans.map(l => `
-            <div class="grid grid-cols-1 lg:grid-cols-4 gap-2 items-end p-3 bg-slate-950/40 border border-slate-800 rounded">
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Název / popis</span>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2 items-end p-3 bg-slate-950/40 border border-slate-800 rounded">
+                <label class="block lg:col-span-2">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Název úvěru / závazku</span>
                     <input type="text" class="pro-input" value="${escapeHtml(l.name)}"
                         onchange="app.updateLoan('${l.id}', 'name', this.value)">
                 </label>
                 <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Výše (Kč)</span>
-                    <input type="number" class="pro-input" min="0" step="10000" value="${l.amount || 0}"
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Nesplacená jistina (Kč)</span>
+                    <input type="number" class="pro-input" min="0" step="50000" value="${l.amount || 0}"
                         onchange="app.updateLoan('${l.id}', 'amount', this.value)">
                 </label>
                 <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Hlavní dlužník</span>
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Měsíční splátka (Kč)</span>
+                    <input type="number" class="pro-input" min="0" step="500" value="${l.monthlyPayment || 0}"
+                        onchange="app.updateLoan('${l.id}', 'monthlyPayment', this.value)">
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Hlavní dlužník</span>
                     <select class="pro-input" onchange="app.updateLoan('${l.id}', 'linkedClientId', this.value)">
                         <option value="">-- vyberte --</option>
                         ${state.clients.map(c => `<option value="${c.id}" ${l.linkedClientId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
                     </select>
                 </label>
-                <div class="flex items-end justify-end">
-                    <button onclick="app.removeLoan('${l.id}')" class="btn-danger">
-                        <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>Smazat
+                <div class="flex items-end justify-between gap-2">
+                    <label class="block grow">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Zbývá (let)</span>
+                        <input type="number" class="pro-input" min="1" max="40" value="${l.remainingYears || 20}"
+                            onchange="app.updateLoan('${l.id}', 'remainingYears', this.value)">
+                    </label>
+                    <button onclick="app.removeLoan('${l.id}')" class="btn-danger" title="Smazat úvěr">
+                        <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                     </button>
                 </div>
             </div>
@@ -663,19 +1534,45 @@
         updateLoansTotals();
         if (window.lucide) lucide.createIcons();
     }
+
     function updateLoansTotals() {
         const total = sumLoans();
+        const monthly = sumLoansMonthly();
+        const newDeath = effectiveDeathCover(state.proposedContracts);
         document.getElementById('loansTotal').textContent = fmtCZK(total);
+        const mEl = document.getElementById('loansMonthlyTotal');
+        if (mEl) mEl.textContent = `Měsíční splátky celkem: ${fmtCZK(monthly)} / měs`;
         document.getElementById('loansRecommended').textContent = fmtCZK(Math.round(total * 1.15));
+
+        const stEl = document.getElementById('loansCoverageStatus');
+        const subEl = document.getElementById('loansCoverageSub');
+        if (stEl && subEl) {
+            if (total === 0) {
+                stEl.textContent = 'Bez úvěrů';
+                stEl.className = 'text-2xl font-bold font-mono text-slate-400';
+            } else if (newDeath >= total) {
+                stEl.textContent = `✔ Kryto (${fmtCZKShort(newDeath)})`;
+                stEl.className = 'text-2xl font-bold font-mono text-emerald-300';
+                subEl.textContent = `Přesah nad jistinu: +${fmtCZK(newDeath - total)}`;
+            } else {
+                stEl.textContent = `✖ Chybí ${fmtCZKShort(total - newDeath)}`;
+                stEl.className = 'text-2xl font-bold font-mono text-rose-300';
+                subEl.textContent = `Součet Smrt + Smrt klesající v návrhu: ${fmtCZK(newDeath)}`;
+            }
+        }
     }
+
     function addLoan() {
-        state.loans.push({ id: uid(), name: 'Nový úvěr', amount: 0, linkedClientId: state.clients[0] ? state.clients[0].id : '' });
+        state.loans.push({
+            id: uid(), name: 'Nový úvěr', amount: 1000000, monthlyPayment: 5500,
+            remainingYears: 20, linkedClientId: state.clients[0] ? state.clients[0].id : ''
+        });
         save(); renderLoans(); renderKPIs();
     }
     function updateLoan(id, field, value) {
         const l = state.loans.find(l => l.id === id);
         if (!l) return;
-        if (field === 'amount') value = num(value);
+        if (['amount', 'monthlyPayment', 'remainingYears', 'interestRate'].includes(field)) value = num(value);
         l[field] = value;
         save(); updateLoansTotals(); renderKPIs();
     }
@@ -684,78 +1581,130 @@
         save(); renderLoans(); renderKPIs();
     }
 
-    /* ════════════ SCENARIO ════════════ */
+    /* ════════════ TAB 6: SCENARIOS & TN PROGRESSION SIMULATOR ════════════ */
     function refreshScenarioPersons() {
         const sel = document.getElementById('scenarioPerson');
+        if (!sel) return;
         const cur = sel.value;
         sel.innerHTML = state.clients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
         if (cur && state.clients.find(c => c.id === cur)) sel.value = cur;
         else if (state.clients[0]) sel.value = state.clients[0].id;
     }
+
+    function applyScenarioPreset(preset) {
+        const setV = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+        const setC = (id, v) => { const e = document.getElementById(id); if (e) e.checked = !!v; };
+        if (preset === 'fracture') {
+            setV('scenarioPnDays', 90); setV('scenarioHospDays', 5); setV('scenarioOcrDays', 0);
+            setV('scenarioInjury', 'both'); setV('scenarioTnPct', 0);
+            setC('scenarioRetroactive', true); setC('scenarioCriticalIllness', false); setC('scenarioDisability3', false);
+        } else if (preset === 'carCrash') {
+            setV('scenarioPnDays', 120); setV('scenarioHospDays', 21); setV('scenarioOcrDays', 0);
+            setV('scenarioInjury', 'both'); setV('scenarioTnPct', 50);
+            setC('scenarioRetroactive', true); setC('scenarioCriticalIllness', false); setC('scenarioDisability3', false);
+            setV('tnSimSlider', 50);
+        } else if (preset === 'cancer') {
+            setV('scenarioPnDays', 180); setV('scenarioHospDays', 14); setV('scenarioOcrDays', 0);
+            setV('scenarioInjury', 'none'); setV('scenarioTnPct', 0);
+            setC('scenarioRetroactive', true); setC('scenarioCriticalIllness', true); setC('scenarioDisability3', false);
+        } else if (preset === 'disability3') {
+            setV('scenarioPnDays', 180); setV('scenarioHospDays', 10); setV('scenarioOcrDays', 0);
+            setV('scenarioInjury', 'none'); setV('scenarioTnPct', 0);
+            setC('scenarioRetroactive', true); setC('scenarioCriticalIllness', false); setC('scenarioDisability3', true);
+        } else if (preset === 'childCare') {
+            setV('scenarioPnDays', 0); setV('scenarioHospDays', 7); setV('scenarioOcrDays', 30);
+            setV('scenarioInjury', 'minor'); setV('scenarioTnPct', 0);
+            setC('scenarioRetroactive', false); setC('scenarioCriticalIllness', false); setC('scenarioDisability3', false);
+        }
+        renderScenario();
+        renderTnProgressionSim();
+    }
+
     function readScenarioInputs() {
         return {
-            person: document.getElementById('scenarioPerson').value,
-            pnDays: num(document.getElementById('scenarioPnDays').value) || 0,
-            hospDays: num(document.getElementById('scenarioHospDays').value) || 0,
-            injury: document.getElementById('scenarioInjury').value,
-            retroactive: document.getElementById('scenarioRetroactive').checked
+            person: document.getElementById('scenarioPerson') ? document.getElementById('scenarioPerson').value : '',
+            pnDays: num(document.getElementById('scenarioPnDays')?.value),
+            hospDays: num(document.getElementById('scenarioHospDays')?.value),
+            ocrDays: num(document.getElementById('scenarioOcrDays')?.value),
+            injury: document.getElementById('scenarioInjury') ? document.getElementById('scenarioInjury').value : 'minor',
+            tnDamagePct: num(document.getElementById('scenarioTnPct')?.value),
+            retroactive: !!document.getElementById('scenarioRetroactive')?.checked,
+            includeCriticalIllness: !!document.getElementById('scenarioCriticalIllness')?.checked,
+            includeDisability3: !!document.getElementById('scenarioDisability3')?.checked
         };
     }
-    function persistScenario(s) { state.scenario = s; save(); }
 
     function computeScenarioForList(list, person, sc) {
         const personId = person.id;
-        const items = list.filter(c => c.clientId === personId);
+        const items = (list || []).filter(c => c.clientId === personId);
         const sums = {};
         D.CATEGORIES.forEach(cat => { sums[cat.key] = items.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0); });
 
-        const pnDays = sc.pnDays;
-        const hospDays = sc.hospDays;
+        const maxProg = items.length ? Math.max(...items.map(c => num(c.conditions && c.conditions.tnProgression) || 400)) : 400;
+        const hasContractRetro = items.some(c => c.conditions && c.conditions.pnRetroactive);
+        const useRetro = sc.retroactive || hasContractRetro;
 
-        let urazPay = 0, urazVelkyPay = 0;
+        const pnDays = num(sc.pnDays);
+        const hospDays = num(sc.hospDays);
+        const ocrDays = num(sc.ocrDays);
+        const tnPct = num(sc.tnDamagePct);
+
+        let urazPay = 0, urazVelkyPay = 0, zlomPay = 0;
         if (sc.injury === 'minor' || sc.injury === 'both') urazPay = sums.uraz * pnDays;
-        if (sc.injury === 'major' || sc.injury === 'both') urazVelkyPay = sums.urazVelky * Math.max(0, pnDays - 30);
+        if (sc.injury === 'major' || sc.injury === 'both') urazVelkyPay = sums.urazVelky * Math.max(0, pnDays - 28);
+        if (sc.injury === 'both' || sc.injury === 'major') zlomPay = sums.zlomeninyPopaleniny;
 
         const hospPay = sums.hosp * hospDays;
-        const hospUrazPay = sums.hospUraz * hospDays;
+        const hospUrazPay = (sc.injury !== 'none' ? sums.hospUraz * hospDays : 0);
 
-        let pn28Pay, pn61Pay;
-        if (sc.retroactive) {
-            pn28Pay = pnDays >= 29 ? sums.pn28 * pnDays : 0;
-            pn61Pay = pnDays >= 61 ? sums.pn61 * pnDays : 0;
-        } else {
-            pn28Pay = sums.pn28 * Math.max(0, pnDays - 28);
-            pn61Pay = sums.pn61 * Math.max(0, pnDays - 60);
+        const pn15Pay = useRetro ? (pnDays >= 15 ? sums.pn15 * pnDays : 0) : sums.pn15 * Math.max(0, pnDays - 14);
+        const pn28Pay = useRetro ? (pnDays >= 29 ? sums.pn28 * pnDays : 0) : sums.pn28 * Math.max(0, pnDays - 28);
+        const pn61Pay = useRetro ? (pnDays >= 61 ? sums.pn61 * pnDays : 0) : sums.pn61 * Math.max(0, pnDays - 60);
+        const ocrPay  = sums.osetrovani * Math.max(0, ocrDays - 9);
+        const chirPay = (hospDays > 0 || sc.injury !== 'none') ? sums.chir : 0;
+
+        /* Trvalé následky úrazu s progresí */
+        let tnPay = 0;
+        if (tnPct > 0) {
+            const mult = D.computeTnProgressionMultiplier(tnPct, maxProg);
+            tnPay += Math.round(sums.tnUraz * mult);
+            if (tnPct >= 10) tnPay += Math.round(sums.tnUraz10 * mult);
         }
-        const chirPay = sums.chir; /* zjednodušeně 1 zákrok */
+
+        const zoPay = sc.includeCriticalIllness ? (sums.zavOn + sums.zavOnKles + sums.zavOnMuzZena) : 0;
+        const invPay = sc.includeDisability3 ? (sums.invalidita + sums.invKles) : 0;
 
         const lines = [
-            { label: 'Drobný úraz (denní)', rate: `${sums.uraz} Kč/d × ${pnDays} dní`,             amount: urazPay,      include: sc.injury !== 'major' && sums.uraz > 0 },
-            { label: 'Vážný úraz (denní)',  rate: `${sums.urazVelky} Kč/d × ${Math.max(0, pnDays - 30)} dní (od 30.dne)`, amount: urazVelkyPay, include: (sc.injury === 'major' || sc.injury === 'both') && sums.urazVelky > 0 },
-            { label: 'Hospitalizace',       rate: `${sums.hosp} Kč/d × ${hospDays} dní`,           amount: hospPay,      include: sums.hosp > 0 },
-            { label: 'Hosp. úraz',          rate: `${sums.hospUraz} Kč/d × ${hospDays} dní`,       amount: hospUrazPay,  include: sums.hospUraz > 0 },
-            { label: sc.retroactive && pnDays >= 29 ? 'PN 28. den (od 1.dne zpětně)' : 'PN 28. den',
-              rate:  sc.retroactive ? `${sums.pn28} Kč/d × ${pnDays} dní` : `${sums.pn28} Kč/d × ${Math.max(0, pnDays - 28)} dní`,
-              amount: pn28Pay,  include: sums.pn28 > 0 },
-            { label: sc.retroactive && pnDays >= 61 ? 'PN 61. den (od 1.dne zpětně)' : 'PN 61. den',
-              rate:  sc.retroactive ? `${sums.pn61} Kč/d × ${pnDays} dní` : `${sums.pn61} Kč/d × ${Math.max(0, pnDays - 60)} dní`,
-              amount: pn61Pay,  include: sums.pn61 > 0 },
-            { label: 'Chirurgický zákrok',  rate: `1× max ${fmtCZKShort(sums.chir)}`, amount: chirPay, include: sums.chir > 0 }
+            { label: 'Denní odškodné úrazu (DOÚ)', rate: `${sums.uraz} Kč/d × ${pnDays} dní`, amount: urazPay, include: sc.injury !== 'none' && sc.injury !== 'major' && sums.uraz > 0 },
+            { label: 'Vážný úraz (nad 28 dní)', rate: `${sums.urazVelky} Kč/d × ${Math.max(0, pnDays - 28)} dní`, amount: urazVelkyPay, include: (sc.injury === 'major' || sc.injury === 'both') && sums.urazVelky > 0 },
+            { label: 'Zlomeniny a popáleniny', rate: 'jednorázové plnění', amount: zlomPay, include: zlomPay > 0 },
+            { label: `Trvalé následky úrazu (${tnPct} %, progrese ${maxProg} %)`, rate: `základ ${fmtCZKShort(sums.tnUraz + sums.tnUraz10)} × koef. progrese`, amount: tnPay, include: tnPay > 0 },
+            { label: 'Hospitalizace (nemoc / úraz)', rate: `${sums.hosp} Kč/d × ${hospDays} dní`, amount: hospPay, include: sums.hosp > 0 && hospDays > 0 },
+            { label: 'Hospitalizace úrazem', rate: `${sums.hospUraz} Kč/d × ${hospDays} dní`, amount: hospUrazPay, include: hospUrazPay > 0 },
+            { label: useRetro && pnDays >= 15 ? 'PN od 15. dne (zpětně od 1. dne)' : 'PN od 15. dne', rate: `${sums.pn15} Kč/d`, amount: pn15Pay, include: sums.pn15 > 0 && pnDays > 0 },
+            { label: useRetro && pnDays >= 29 ? 'PN od 29. dne (zpětně od 1. dne)' : 'PN od 29. dne', rate: useRetro ? `${sums.pn28} Kč/d × ${pnDays} dní` : `${sums.pn28} Kč/d × ${Math.max(0, pnDays - 28)} dní`, amount: pn28Pay, include: sums.pn28 > 0 && pnDays > 0 },
+            { label: useRetro && pnDays >= 61 ? 'PN od 61. dne (zpětně od 1. dne)' : 'PN od 61. dne', rate: useRetro ? `${sums.pn61} Kč/d × ${pnDays} dní` : `${sums.pn61} Kč/d × ${Math.max(0, pnDays - 60)} dní`, amount: pn61Pay, include: sums.pn61 > 0 && pnDays > 0 },
+            { label: 'Ošetřování dítěte / člena rodiny (OČR)', rate: `${sums.osetrovani} Kč/d × ${Math.max(0, ocrDays - 9)} dní`, amount: ocrPay, include: sums.osetrovani > 0 && ocrDays > 0 },
+            { label: 'Chirurgický zákrok', rate: `limit ${fmtCZKShort(sums.chir)}`, amount: chirPay, include: chirPay > 0 },
+            { label: 'Závažné onemocnění (ZO)', rate: 'jednorázová výplata', amount: zoPay, include: zoPay > 0 },
+            { label: 'Invalidita III. stupně', rate: 'jednorázová výplata', amount: invPay, include: invPay > 0 }
         ];
         const total = lines.filter(l => l.include).reduce((s, l) => s + l.amount, 0);
         return { lines, total };
     }
 
     function renderScenario() {
+        const resEl = document.getElementById('scenarioResult');
+        if (!resEl) return;
         if (!state.clients.length) {
-            document.getElementById('scenarioResult').innerHTML = '<div class="text-xs text-slate-500 italic">Nejprve přidejte osoby a smlouvy.</div>';
-            document.getElementById('incomeCoverage').innerHTML = '';
+            resEl.innerHTML = '<div class="text-xs text-slate-500 italic">Nejprve přidejte osoby a smlouvy.</div>';
             return;
         }
         refreshScenarioPersons();
         const sc = readScenarioInputs();
-        persistScenario(sc);
-        const person = state.clients.find(c => c.id === sc.person);
+        state.scenario = sc;
+        save();
+        const person = state.clients.find(c => c.id === sc.person) || state.clients[0];
         if (!person) return;
 
         const curR = computeScenarioForList(state.currentContracts, person, sc);
@@ -765,88 +1714,157 @@
             const nl = newR.lines[i];
             if (!cl.include && !nl.include) return '';
             return `<div class="sc-line">
-                <div>${escapeHtml(cl.label)}</div>
-                <div class="sc-amount">${cl.include ? fmtCZK(cl.amount) : '<span class="text-slate-700">—</span>'}</div>
+                <div class="font-medium text-slate-200">${escapeHtml(cl.label)}</div>
+                <div class="sc-amount">${cl.include ? fmtCZK(cl.amount) : '<span class="text-slate-600">—</span>'}</div>
                 <div class="sc-rate">${cl.include ? escapeHtml(cl.rate) : ''}</div>
-                <div class="sc-amount">${nl.include ? fmtCZK(nl.amount) : '<span class="text-slate-700">—</span>'}</div>
+                <div class="sc-amount font-semibold text-sky-300">${nl.include ? fmtCZK(nl.amount) : '<span class="text-slate-600">—</span>'}</div>
                 <div class="sc-rate">${nl.include ? escapeHtml(nl.rate) : ''}</div>
             </div>`;
         }).join('');
 
         const diff = newR.total - curR.total;
-        const diffClass = diff > 0 ? 'text-emerald-300' : diff < 0 ? 'text-rose-300' : 'text-slate-300';
+        const diffClass = diff > 0 ? 'text-emerald-300 font-bold' : diff < 0 ? 'text-rose-300 font-bold' : 'text-slate-300';
 
-        document.getElementById('scenarioResult').innerHTML = `
+        resEl.innerHTML = `
             <div class="border border-slate-800 rounded overflow-hidden">
                 <div class="sc-line sc-line-header">
-                    <div>Položka</div>
-                    <div class="sc-amount">Stáv. Σ</div>
-                    <div class="sc-rate">Stáv. výpočet</div>
-                    <div class="sc-amount">Návrh Σ</div>
+                    <div>Složka pojistného plnění (${escapeHtml(person.name)})</div>
+                    <div class="sc-amount">Stávající Σ</div>
+                    <div class="sc-rate">Stávající výpočet</div>
+                    <div class="sc-amount">Návrh poradce Σ</div>
                     <div class="sc-rate">Návrh výpočet</div>
                 </div>
-                ${linesHtml || `<div class="text-xs text-slate-500 italic p-4">Tato osoba nemá pojištění s plněním pro tento scénář.</div>`}
+                ${linesHtml || `<div class="text-xs text-slate-500 italic p-4">Pro zvolený scénář nevzniká v portfoliu plnění.</div>`}
                 <div class="sc-line sc-line-total">
-                    <div>Celkové plnění ze scénáře</div>
+                    <div>Celková výplata z pojištění v tomto scénáři</div>
                     <div class="sc-amount">${fmtCZK(curR.total)}</div>
                     <div></div>
-                    <div class="sc-amount">${fmtCZK(newR.total)}</div>
-                    <div class="${diffClass} sc-rate">Δ ${(diff >= 0 ? '+' : '')}${fmtCZK(diff)}</div>
+                    <div class="sc-amount text-sky-300">${fmtCZK(newR.total)}</div>
+                    <div class="${diffClass} sc-rate">Rozdíl: ${(diff >= 0 ? '+' : '')}${fmtCZK(diff)}</div>
                 </div>
             </div>
         `;
 
-        /* Income coverage */
         renderIncomeCoverage(person, sc);
     }
 
-    function computeMonthlyIncomeCoverage(list, person, sc) {
+    function renderTnProgressionSim() {
+        const out = document.getElementById('tnProgressionSimOutput');
+        const slider = document.getElementById('tnSimSlider');
+        const lbl = document.getElementById('tnSimSliderLabel');
+        if (!out || !slider) return;
+        const pct = num(slider.value) || 35;
+        if (lbl) lbl.textContent = pct + ' %';
+
+        const personId = document.getElementById('scenarioPerson')?.value || (state.clients[0] && state.clients[0].id);
+        const person = state.clients.find(c => c.id === personId) || state.clients[0];
+        if (!person) return;
+
+        const curItems = state.currentContracts.filter(c => c.clientId === person.id);
+        const newItems = state.proposedContracts.filter(c => c.clientId === person.id);
+
+        const curBase = sumItemFor(state.currentContracts, person.id, 'tnUraz') + (pct >= 10 ? sumItemFor(state.currentContracts, person.id, 'tnUraz10') : 0);
+        const newBase = sumItemFor(state.proposedContracts, person.id, 'tnUraz') + (pct >= 10 ? sumItemFor(state.proposedContracts, person.id, 'tnUraz10') : 0);
+
+        const curProg = curItems.length ? Math.max(...curItems.map(c => num(c.conditions && c.conditions.tnProgression) || 400)) : 400;
+        const newProg = newItems.length ? Math.max(...newItems.map(c => num(c.conditions && c.conditions.tnProgression) || 800)) : 800;
+
+        const checkpoints = [10, 25, 50, 75, 100];
+        const curMultNow = D.computeTnProgressionMultiplier(pct, curProg);
+        const newMultNow = D.computeTnProgressionMultiplier(pct, newProg);
+        const curPayNow = Math.round(curBase * curMultNow);
+        const newPayNow = Math.round(newBase * newMultNow);
+
+        out.innerHTML = `
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                <div class="kpi-card">
+                    <div class="text-[10px] uppercase text-slate-500 font-bold">Stávající výplata při ${pct}% poškození</div>
+                    <div class="text-xl font-bold font-mono text-slate-300">${fmtCZK(curPayNow)}</div>
+                    <div class="text-[10px] text-slate-500">Základ ${fmtCZK(curBase)} · Progrese max. ${curProg} %</div>
+                </div>
+                <div class="kpi-card border-sky-500/40">
+                    <div class="text-[10px] uppercase text-sky-400 font-bold">Navrhovaná výplata při ${pct}% poškození</div>
+                    <div class="text-xl font-bold font-mono text-sky-300">${fmtCZK(newPayNow)}</div>
+                    <div class="text-[10px] text-slate-400">Základ ${fmtCZK(newBase)} · Progrese max. ${newProg} % (efektivně ${(newMultNow * 100).toFixed(0)} %)</div>
+                </div>
+                <div class="kpi-card border-emerald-500/40">
+                    <div class="text-[10px] uppercase text-emerald-400 font-bold">Navýšení plnění díky Návrhu</div>
+                    <div class="text-xl font-bold font-mono text-emerald-300">${newPayNow - curPayNow >= 0 ? '+' : ''}${fmtCZK(newPayNow - curPayNow)}</div>
+                    <div class="text-[10px] text-slate-400">Pro osobu: ${escapeHtml(person.name)}</div>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Rozsah trvalých následků úrazu</th>
+                            ${checkpoints.map(cp => `<th class="num ${cp === pct ? 'text-orange-300' : ''}">Poškození ${cp} %</th>`).join('')}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Stávající portfolio</strong> (progrese ${curProg} %)</td>
+                            ${checkpoints.map(cp => {
+                                const b = sumItemFor(state.currentContracts, person.id, 'tnUraz') + (cp >= 10 ? sumItemFor(state.currentContracts, person.id, 'tnUraz10') : 0);
+                                return `<td class="num text-slate-400">${fmtCZK(Math.round(b * D.computeTnProgressionMultiplier(cp, curProg)))}</td>`;
+                            }).join('')}
+                        </tr>
+                        <tr>
+                            <td><strong class="text-sky-300">Návrh poradce</strong> (progrese ${newProg} %)</td>
+                            ${checkpoints.map(cp => {
+                                const b = sumItemFor(state.proposedContracts, person.id, 'tnUraz') + (cp >= 10 ? sumItemFor(state.proposedContracts, person.id, 'tnUraz10') : 0);
+                                return `<td class="num font-bold text-sky-300">${fmtCZK(Math.round(b * D.computeTnProgressionMultiplier(cp, newProg)))}</td>`;
+                            }).join('')}
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    function computeMonthlyIncomeCoverage(list, person) {
         const personId = person.id;
-        const items = list.filter(c => c.clientId === personId);
-        const sumPn28 = items.reduce((s, c) => s + num(c.items && c.items.pn28), 0);
-        const sumPn61 = items.reduce((s, c) => s + num(c.items && c.items.pn61), 0);
-        const sumHosp = items.reduce((s, c) => s + num(c.items && c.items.hosp), 0);
-        const sumUraz = items.reduce((s, c) => s + num(c.items && c.items.uraz), 0);
+        const sumPn15 = sumItemFor(list, personId, 'pn15');
+        const sumPn28 = sumItemFor(list, personId, 'pn28');
+        const sumPn61 = sumItemFor(list, personId, 'pn61');
+        const dailyPn = sumPn15 + sumPn28 + sumPn61;
+        const monthlyFromInsurance = dailyPn * 30;
 
-        const dailyFromInsurance = sumPn28 + sumPn61 + sumHosp + sumUraz;
-        const monthlyFromInsurance = dailyFromInsurance * 30;
-
-        let stateBenefit = 0;
-        if (!person.isEntrepreneur) {
-            const gross = num(person.incomeGross);
-            const rate = D.sickLeaveRate(gross);
-            stateBenefit = Math.min(gross * rate, D.SICKLEAVE_CAP);
-        }
+        const sick = D.computeExactSickLeave(person.incomeGross, person.isEntrepreneur, 60);
+        const stateBenefit = sick.monthlyAvg;
         return { stateBenefit, insurance: monthlyFromInsurance, total: stateBenefit + monthlyFromInsurance };
     }
 
     function renderIncomeCoverage(person, sc) {
-        const cur = computeMonthlyIncomeCoverage(state.currentContracts, person, sc);
-        const nw  = computeMonthlyIncomeCoverage(state.proposedContracts, person, sc);
+        const cur = computeMonthlyIncomeCoverage(state.currentContracts, person);
+        const nw  = computeMonthlyIncomeCoverage(state.proposedContracts, person);
         const gross = num(person.incomeGross);
-        const targetNet = gross * 0.75; /* hrubý odhad čistého */
-        const curPct = targetNet > 0 ? Math.min(150, cur.total / targetNet * 100) : 0;
-        const newPct = targetNet > 0 ? Math.min(150, nw.total / targetNet * 100) : 0;
-        const meter = (pct) => `<div class="meter mt-1"><div class="fill ${pct >= 100 ? 'fill-good' : pct >= 60 ? 'fill-warn' : 'fill-danger'}" style="width:${Math.min(100, pct)}%"></div></div>`;
+        const net = D.computeNetIncome(gross, person.isEntrepreneur);
+        const curPct = net > 0 ? Math.min(150, cur.total / net * 100) : 0;
+        const newPct = net > 0 ? Math.min(150, nw.total / net * 100) : 0;
+        const meter = (pct) => `<div class="meter mt-1.5"><div class="fill ${pct >= 85 ? 'fill-good' : pct >= 60 ? 'fill-warn' : 'fill-danger'}" style="width:${Math.min(100, pct)}%"></div></div>`;
+
         document.getElementById('incomeCoverage').innerHTML = `
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="kpi-card">
-                    <div class="text-[10px] uppercase text-slate-500 font-bold mb-2">Stávající portfolio</div>
+                    <div class="text-[10px] uppercase text-slate-400 font-bold mb-2">Stávající portfolio — Měsíční bilance v PN (${escapeHtml(person.name)})</div>
                     <div class="space-y-1 text-xs text-slate-300">
-                        <div class="flex justify-between"><span>Nemocenská ČSSZ:</span><span class="font-mono">${fmtCZK(cur.stateBenefit)}</span></div>
-                        <div class="flex justify-between"><span>Z pojistek (30 dní):</span><span class="font-mono">${fmtCZK(cur.insurance)}</span></div>
-                        <div class="flex justify-between border-t border-slate-800 pt-1 mt-1 font-bold"><span>Celkem / měs:</span><span class="font-mono text-emerald-300">${fmtCZK(cur.total)}</span></div>
-                        <div class="text-[10px] text-slate-500">Cílový čistý příjem (≈75 % hrubého): ${fmtCZK(targetNet)} → pokrytí <strong>${curPct.toFixed(0)} %</strong></div>
+                        <div class="flex justify-between"><span>Čistý měsíční příjem:</span><span class="font-mono font-semibold">${fmtCZK(net)}</span></div>
+                        <div class="flex justify-between"><span>Nemocenská ČSSZ (2026):</span><span class="font-mono">${fmtCZK(cur.stateBenefit)}</span></div>
+                        <div class="flex justify-between"><span>Z pojistek (denní dávky PN × 30 dní):</span><span class="font-mono">${fmtCZK(cur.insurance)}</span></div>
+                        <div class="flex justify-between border-t border-slate-800 pt-1 mt-1 font-bold"><span>Celkový příjem v PN / měs:</span><span class="font-mono text-emerald-300">${fmtCZK(cur.total)}</span></div>
+                        <div class="text-[10px] text-slate-400">Pokrytí čistého příjmu: <strong>${curPct.toFixed(0)} %</strong> (chybí ${fmtCZK(Math.max(0, net - cur.total))}/měs)</div>
                         ${meter(curPct)}
                     </div>
                 </div>
-                <div class="kpi-card">
-                    <div class="text-[10px] uppercase text-slate-500 font-bold mb-2">Navrhované portfolio</div>
+                <div class="kpi-card border-sky-500/30">
+                    <div class="text-[10px] uppercase text-sky-400 font-bold mb-2">Návrh poradce — Měsíční bilance v PN (${escapeHtml(person.name)})</div>
                     <div class="space-y-1 text-xs text-slate-300">
-                        <div class="flex justify-between"><span>Nemocenská ČSSZ:</span><span class="font-mono">${fmtCZK(nw.stateBenefit)}</span></div>
-                        <div class="flex justify-between"><span>Z pojistek (30 dní):</span><span class="font-mono">${fmtCZK(nw.insurance)}</span></div>
-                        <div class="flex justify-between border-t border-slate-800 pt-1 mt-1 font-bold"><span>Celkem / měs:</span><span class="font-mono text-sky-300">${fmtCZK(nw.total)}</span></div>
-                        <div class="text-[10px] text-slate-500">Cílový čistý příjem (≈75 % hrubého): ${fmtCZK(targetNet)} → pokrytí <strong>${newPct.toFixed(0)} %</strong></div>
+                        <div class="flex justify-between"><span>Čistý měsíční příjem:</span><span class="font-mono font-semibold">${fmtCZK(net)}</span></div>
+                        <div class="flex justify-between"><span>Nemocenská ČSSZ (2026):</span><span class="font-mono">${fmtCZK(nw.stateBenefit)}</span></div>
+                        <div class="flex justify-between"><span>Z pojistek (denní dávky PN × 30 dní):</span><span class="font-mono text-sky-300">${fmtCZK(nw.insurance)}</span></div>
+                        <div class="flex justify-between border-t border-slate-800 pt-1 mt-1 font-bold"><span>Celkový příjem v PN / měs:</span><span class="font-mono text-sky-300">${fmtCZK(nw.total)}</span></div>
+                        <div class="text-[10px] text-slate-400">Pokrytí čistého příjmu: <strong>${newPct.toFixed(0)} %</strong> (chybí ${fmtCZK(Math.max(0, net - nw.total))}/měs)</div>
                         ${meter(newPct)}
                     </div>
                 </div>
@@ -854,137 +1872,281 @@
         `;
     }
 
-    /* ════════════ COMPARISON ════════════ */
+    /* ════════════ TAB 7: COMPARISON, CONTRACT ACTION ROADMAP & CHARTS ════════════ */
     let chartInstance = null;
+    let radarChartInstance = null;
+
     function refreshCompareFilter() {
         const sel = document.getElementById('compareFilter');
+        if (!sel) return;
         const cur = sel.value || 'ALL';
-        sel.innerHTML = '<option value="ALL">Souhrn – všichni</option>' +
+        sel.innerHTML = '<option value="ALL">Souhrn – celá rodina</option>' +
             state.clients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
         sel.value = cur;
     }
+
+    function renderContractActionSummary() {
+        const el = document.getElementById('contractActionSummary');
+        if (!el) return;
+
+        const curRows = state.currentContracts.map(c => `
+            <tr>
+                <td><strong>${escapeHtml(clientName(c.clientId))}</strong></td>
+                <td>${escapeHtml(c.insurer || '—')} <span class="font-mono text-slate-400 text-[10px]">(${escapeHtml(c.contractNo || '—')})</span></td>
+                <td class="num">${fmtCZK(contractMonthlyPremium(c))}</td>
+                <td>${actionBadgeHtml(c, 'current')}</td>
+                <td class="text-slate-300 text-[11px]">${escapeHtml(c.actionReason || c.note || '—')}</td>
+            </tr>
+        `).join('');
+
+        const newOnly = state.proposedContracts.filter(c => c.proposalStatus === 'new' || c.proposalStatus === 'modified');
+        const newRows = newOnly.map(c => `
+            <tr>
+                <td><strong>${escapeHtml(clientName(c.clientId))}</strong></td>
+                <td>${escapeHtml(c.insurer || '—')} <span class="font-mono text-slate-400 text-[10px]">(${escapeHtml(c.contractNo || '—')})</span></td>
+                <td class="num text-sky-300 font-bold">${fmtCZK(contractMonthlyPremium(c))}</td>
+                <td>${actionBadgeHtml(c, 'proposed')}</td>
+                <td class="text-slate-300 text-[11px]">${escapeHtml(c.actionReason || c.note || '—')}</td>
+            </tr>
+        `).join('');
+
+        el.innerHTML = `
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div>
+                    <div class="text-xs font-bold uppercase text-slate-400 mb-1.5">A) Co udělat se stávajícími smlouvami klienta (${state.currentContracts.length})</div>
+                    <div class="overflow-x-auto border border-slate-800 rounded">
+                        <table class="data-table">
+                            <thead>
+                                <tr><th>Osoba</th><th>Smlouva</th><th class="num">Platba</th><th>Krok</th><th>Zdůvodnění poradce</th></tr>
+                            </thead>
+                            <tbody>${curRows || '<tr><td colspan="5" class="text-center text-slate-500 italic py-2">Žádné stávající smlouvy</td></tr>'}</tbody>
+                        </table>
+                    </div>
+                </div>
+                <div>
+                    <div class="text-xs font-bold uppercase text-sky-400 mb-1.5">B) Nově sjednávané / upravované smlouvy v Návrhu (${newOnly.length})</div>
+                    <div class="overflow-x-auto border border-slate-800 rounded">
+                        <table class="data-table">
+                            <thead>
+                                <tr><th>Osoba</th><th>Nová smlouva</th><th class="num">Platba</th><th>Status</th><th>Účel v modelaci poradce</th></tr>
+                            </thead>
+                            <tbody>${newRows || '<tr><td colspan="5" class="text-center text-slate-500 italic py-2">Žádné nové smlouvy</td></tr>'}</tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
     function renderComparison() {
         refreshCompareFilter();
-        const filter = document.getElementById('compareFilter').value || 'ALL';
+        renderContractActionSummary();
+        const filter = document.getElementById('compareFilter')?.value || 'ALL';
+        const catMode = document.getElementById('compareCatMode')?.value || 'active';
         const filterList = (list) => filter === 'ALL' ? list : list.filter(c => c.clientId === filter);
         const cur = filterList(state.currentContracts);
         const nw  = filterList(state.proposedContracts);
 
-        const rows = D.CATEGORIES.map(cat => {
-            const cv = cur.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
-            const nv = nw.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
-            const diff = nv - cv;
-            const cls = diff > 0 ? 'v-diff-pos' : diff < 0 ? 'v-diff-neg' : 'v-diff-zero';
-            const fmt = (v) => v ? (cat.kind === 'daily' ? v + ' Kč/d' : fmtCZK(v)) : '—';
-            return `<div class="cmp-row">
-                <div>
-                    <div class="text-xs font-semibold text-slate-200">${escapeHtml(cat.label)}</div>
-                    <div class="text-[10px] text-slate-500">${cat.kind === 'daily' ? 'denní dávka' : 'pojistná částka'}</div>
-                </div>
-                <div class="v v-curr">${fmt(cv)}</div>
-                <div class="v v-new">${fmt(nv)}</div>
-                <div class="v ${cls}">${diff === 0 ? '±0' : (diff > 0 ? '+' : '') + fmt(diff)}</div>
-            </div>`;
-        }).join('');
+        let html = `
+            <div class="cmp-row cmp-row-header">
+                <div>Pojistné riziko / kategorie</div>
+                <div class="text-right">Stávající</div>
+                <div class="text-right">Návrh poradce</div>
+                <div class="text-right">Rozdíl (Δ)</div>
+                <div class="text-right">Hodnocení změny</div>
+            </div>
+        `;
+
+        D.CATEGORY_GROUPS.forEach(grp => {
+            const grpCats = D.CATEGORIES.filter(cat => {
+                if (cat.group !== grp.key) return false;
+                if (catMode === 'all') return true;
+                const cv = cur.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
+                const nv = nw.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
+                return cat.core || cv > 0 || nv > 0;
+            });
+            if (!grpCats.length) return;
+
+            html += `<div class="cmp-group-header">${escapeHtml(grp.label)}</div>`;
+            grpCats.forEach(cat => {
+                const cv = cur.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
+                const nv = nw.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
+                const diff = nv - cv;
+                const cls = diff > 0 ? 'v-diff-pos' : diff < 0 ? 'v-diff-neg' : 'v-diff-zero';
+
+                let verdict = '<span class="text-slate-600">Beze změny</span>';
+                if (cv === 0 && nv > 0) verdict = '<span class="badge badge-sky">★ Nově doplněno</span>';
+                else if (diff > 0)      verdict = '<span class="badge badge-emerald">▲ Posíleno</span>';
+                else if (cv > 0 && nv === 0) verdict = '<span class="badge badge-amber">Odebráno</span>';
+                else if (diff < 0)      verdict = '<span class="badge badge-slate">Optimalizováno</span>';
+                else if (cv > 0 && diff === 0) verdict = '<span class="text-emerald-400 text-[11px]">● Zachováno</span>';
+
+                html += `<div class="cmp-row">
+                    <div>
+                        <div class="text-xs font-semibold text-slate-200">${escapeHtml(cat.label)}</div>
+                        <div class="text-[10px] text-slate-500">${escapeHtml(cat.help.slice(0, 95))}${cat.help.length > 95 ? '…' : ''}</div>
+                    </div>
+                    <div class="v v-curr">${fmtCatValue(cv, cat)}</div>
+                    <div class="v v-new">${fmtCatValue(nv, cat)}</div>
+                    <div class="v ${cls}">${diff === 0 ? '±0' : (diff > 0 ? '+' : '') + fmtCatValue(diff, cat)}</div>
+                    <div class="text-right">${verdict}</div>
+                </div>`;
+            });
+        });
 
         const curM = totalPremiumMonthly(cur);
         const newM = totalPremiumMonthly(nw);
         const diffPrem = newM - curM;
         const premCls = diffPrem > 0 ? 'v-diff-neg' : diffPrem < 0 ? 'v-diff-pos' : 'v-diff-zero';
 
-        document.getElementById('comparisonContent').innerHTML = `
-            <div class="cmp-row cmp-row-header">
-                <div>Kategorie</div>
-                <div class="text-right">Stávající</div>
-                <div class="text-right">Návrh</div>
-                <div class="text-right">Rozdíl</div>
-            </div>
-            ${rows}
+        html += `
             <div class="cmp-row" style="background:#131e34 !important; border-top:2px solid #334155;">
-                <div class="text-xs font-bold text-slate-100">Měsíční pojistné</div>
+                <div class="text-xs font-bold text-slate-100">Měsíční pojistné celkem</div>
                 <div class="v v-curr font-bold">${fmtCZK(curM)}</div>
                 <div class="v v-new font-bold">${fmtCZK(newM)}</div>
                 <div class="v ${premCls} font-bold">${diffPrem === 0 ? '±0' : (diffPrem > 0 ? '+' : '') + fmtCZK(diffPrem)}</div>
-            </div>
-            <div class="cmp-row" style="background:#131e34 !important;">
-                <div class="text-xs font-bold text-slate-100">Roční pojistné</div>
-                <div class="v v-curr font-bold">${fmtCZK(curM*12)}</div>
-                <div class="v v-new font-bold">${fmtCZK(newM*12)}</div>
-                <div class="v ${premCls} font-bold">${diffPrem === 0 ? '±0' : (diffPrem*12 > 0 ? '+' : '') + fmtCZK(diffPrem*12)}</div>
+                <div class="text-right text-[11px] text-slate-400 font-mono">${ fmtCZK(newM * 12) } / rok</div>
             </div>
         `;
 
+        document.getElementById('comparisonContent').innerHTML = html;
+
         renderRecommendations(cur, nw, filter);
+        renderRadarChart(filter);
         renderCategoryChart(cur, nw);
+    }
+
+    function renderRadarChart(filter) {
+        const ctx = document.getElementById('radarChart');
+        if (!ctx) return;
+        const curP = computePortfolioPillars(state.currentContracts, filter);
+        const newP = computePortfolioPillars(state.proposedContracts, filter);
+
+        if (radarChartInstance) radarChartInstance.destroy();
+        radarChartInstance = new Chart(ctx, {
+            type: 'radar',
+            data: {
+                labels: curP.labels,
+                datasets: [
+                    {
+                        label: `Stávající stav (${curP.overall} %)`,
+                        data: curP.scores,
+                        backgroundColor: 'rgba(16, 185, 129, 0.18)',
+                        borderColor: 'rgba(16, 185, 129, 0.9)',
+                        pointBackgroundColor: '#10b981',
+                        borderWidth: 2
+                    },
+                    {
+                        label: `Návrh poradce (${newP.overall} %)`,
+                        data: newP.scores,
+                        backgroundColor: 'rgba(14, 165, 233, 0.25)',
+                        borderColor: 'rgba(56, 189, 248, 1)',
+                        pointBackgroundColor: '#38bdf8',
+                        borderWidth: 2
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    r: {
+                        min: 0,
+                        max: 100,
+                        ticks: { stepSize: 25, color: '#64748b', backdropColor: 'transparent', font: { size: 9 } },
+                        grid: { color: 'rgba(51, 65, 85, 0.5)' },
+                        angleLines: { color: 'rgba(51, 65, 85, 0.5)' },
+                        pointLabels: { color: '#cbd5e1', font: { size: 11, weight: '600' } }
+                    }
+                },
+                plugins: {
+                    legend: { labels: { color: '#cbd5e1', font: { size: 11 } } }
+                }
+            }
+        });
+    }
+
+    function renderCategoryChart(cur, nw) {
+        const ctx = document.getElementById('categoryChart');
+        if (!ctx) return;
+        const activeSumCats = D.CATEGORIES.filter(c =>
+            c.kind === 'sum' && (sumItem(cur, c.key) > 0 || sumItem(nw, c.key) > 0 || ['smrt', 'invalidita', 'zavOn', 'tnUraz'].includes(c.key))
+        );
+        const labels = activeSumCats.map(c => c.short);
+        const dataCur = activeSumCats.map(c => cur.reduce((s, x) => s + num(x.items && x.items[c.key]), 0));
+        const dataNw  = activeSumCats.map(c => nw.reduce((s, x) => s + num(x.items && x.items[c.key]), 0));
+
+        if (chartInstance) chartInstance.destroy();
+        chartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels,
+                datasets: [
+                    { label: 'Stávající (Kč)', data: dataCur, backgroundColor: 'rgba(16,185,129,0.7)', borderColor: 'rgba(16,185,129,1)', borderWidth: 1 },
+                    { label: 'Návrh poradce (Kč)', data: dataNw, backgroundColor: 'rgba(14,165,233,0.75)', borderColor: 'rgba(14,165,233,1)', borderWidth: 1 }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: '#cbd5e1', font: { size: 11 } } },
+                    tooltip: { callbacks: { label: (ctx) => ctx.dataset.label + ': ' + fmtCZK(ctx.parsed.y) } }
+                },
+                scales: {
+                    x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(30,41,59,0.5)' } },
+                    y: { ticks: { color: '#94a3b8', font: { size: 10 }, callback: (v) => v >= 1e6 ? (v / 1e6) + 'M' : v >= 1e3 ? (v / 1e3) + 'k' : v }, grid: { color: 'rgba(30,41,59,0.5)' } }
+                }
+            }
+        });
     }
 
     function renderRecommendations(cur, nw, filter) {
         const recos = [];
-        const personLabel = filter === 'ALL' ? 'všichni dohromady' : 'pro ' + clientName(filter);
+        const personLabel = filter === 'ALL' ? 'za celou rodinu' : 'pro osobu ' + clientName(filter);
 
-        /* Podpojištění úvěry */
-        const loans = filter === 'ALL' ? sumLoans() : state.loans.filter(l => l.linkedClientId === filter).reduce((s, l) => s + num(l.amount), 0);
-        const smrtCur = cur.reduce((s, c) => s + num(c.items && c.items.smrt), 0);
-        const smrtNw  = nw.reduce((s, c) => s + num(c.items && c.items.smrt), 0);
+        /* 1. Podpojištění úvěrů (Smrt + Smrt klesající) */
+        const loans = filter === 'ALL' ? sumLoans() : sumLoansFor(filter);
+        const smrtCur = effectiveDeathCover(cur);
+        const smrtNw  = effectiveDeathCover(nw);
         if (loans > 0) {
-            if (smrtCur < loans) recos.push({ type: 'danger', icon: 'alert-triangle',
-                text: `<strong>Podpojištění (stávající):</strong> krytí smrti ${fmtCZK(smrtCur)} je <strong>${fmtCZK(loans - smrtCur)} pod závazky</strong> ${escapeHtml(personLabel)} (${fmtCZK(loans)}). Pozůstalí by museli závazky řešit z jiných zdrojů.` });
-            if (smrtNw >= loans) recos.push({ type: 'success', icon: 'check-circle',
-                text: `<strong>Návrh řeší krytí smrti:</strong> ${fmtCZK(smrtNw)} ≥ závazky ${fmtCZK(loans)}.` });
-            else if (smrtNw < loans) recos.push({ type: 'warning', icon: 'alert-circle',
-                text: `<strong>Návrh stále nepokrývá:</strong> chybí ${fmtCZK(loans - smrtNw)} k pokrytí závazků.` });
-        }
-
-        /* Chybí invalidita */
-        const invCur = cur.reduce((s, c) => s + num(c.items && c.items.invalidita), 0);
-        const invNw  = nw.reduce((s, c) => s + num(c.items && c.items.invalidita), 0);
-        if (loans > 0 && invNw < loans * 0.5) {
-            recos.push({ type: 'warning', icon: 'shield-alert',
-                text: `<strong>Slabé krytí invalidity:</strong> ${fmtCZK(invNw)} (návrh) je málo vzhledem k závazkům ${fmtCZK(loans)}. Doporučuji minimum 50–80 % výše úvěrů (alespoň ${fmtCZK(loans * 0.5)}).` });
-        }
-
-        /* Žádné PN nebo žádná hospitalizace */
-        const pnAny = nw.reduce((s, c) => s + num(c.items && c.items.pn28) + num(c.items && c.items.pn61), 0);
-        if (pnAny === 0 && (filter === 'ALL' || state.clients.find(c => c.id === filter)?.incomeGross > 0)) {
-            recos.push({ type: 'info', icon: 'briefcase',
-                text: `<strong>Návrh neobsahuje pojištění pracovní neschopnosti.</strong> Při příjmu z práce je dobré ho mít, zejména u OSVČ, kde stát neplatí nemocenskou.` });
-        }
-
-        /* Duplicity */
-        const duplicates = findDuplicates(filter === 'ALL' ? state.proposedContracts : nw);
-        duplicates.forEach(d => recos.push({ type: 'info', icon: 'copy', text: d }));
-
-        /* Změna ceny */
-        const curM = totalPremiumMonthly(cur);
-        const newM = totalPremiumMonthly(nw);
-        const diff = newM - curM;
-        if (Math.abs(diff) > 100) {
-            const pct = curM > 0 ? (diff / curM * 100) : 100;
-            recos.push({ type: diff > 0 ? 'warning' : 'success', icon: diff > 0 ? 'trending-up' : 'trending-down',
-                text: `<strong>Změna měsíční ceny:</strong> ${diff > 0 ? '+' : ''}${fmtCZK(diff)} (${diff > 0 ? '+' : ''}${pct.toFixed(0)} %). ${escapeHtml(personLabel)}.` });
-        }
-
-        /* Kategorie kde návrh úplně chybí */
-        D.CATEGORIES.forEach(cat => {
-            const c = cur.reduce((s, x) => s + num(x.items && x.items[cat.key]), 0);
-            const n = nw.reduce((s, x) => s + num(x.items && x.items[cat.key]), 0);
-            if (c > 0 && n === 0) {
-                recos.push({ type: 'warning', icon: 'minus-circle',
-                    text: `<strong>Návrh ztrácí krytí kategorie „${escapeHtml(cat.label)}".</strong> Ve stávajícím portfoliu jste měli ${fmt(c, cat)}. Ověřte, zda je vypuštění záměrné.` });
+            if (smrtCur < loans) {
+                recos.push({ type: 'danger', icon: 'alert-triangle',
+                    text: `<strong>Kritické podpojištění úvěrů ve stávajícím stavu (${escapeHtml(personLabel)}):</strong> Celkové krytí smrti (${fmtCZK(smrtCur)}) je o <strong>${fmtCZK(loans - smrtCur)} nižší než nesplacené závazky</strong> (${fmtCZK(loans)}).` });
             }
-        });
-
-        /* Klauzule od 1. dne */
-        const hasRetro = nw.some(c => c.conditions && c.conditions.pnRetroactive);
-        if (!hasRetro && nw.some(c => num(c.items && c.items.pn28) > 0 || num(c.items && c.items.pn61) > 0)) {
-            recos.push({ type: 'info', icon: 'clock',
-                text: `<strong>Tip:</strong> Pro PN zvažte rozšíření „<strong>od 1. dne zpětně</strong>" (typicky +15–30 % k pojistnému za PN). Při delší PN vrátí všechny dny zpětně.` });
+            if (smrtNw >= loans) {
+                recos.push({ type: 'success', icon: 'check-circle',
+                    text: `<strong>Návrh poradce plně zajišťuje úvěry:</strong> Kombinace konstantní a klesající PČ smrti (${fmtCZK(smrtNw)}) pokrývá 100 % závazků (${fmtCZK(loans)}) a vytváří rezervu +${fmtCZK(smrtNw - loans)}.` });
+            } else {
+                recos.push({ type: 'warning', icon: 'alert-circle',
+                    text: `<strong>Upozornění k návrhu:</strong> Krytí smrti (${fmtCZK(smrtNw)}) je stále o ${fmtCZK(loans - smrtNw)} nižší než závazky (${fmtCZK(loans)}). Zvažte navýšení klesající PČ.` });
+            }
         }
 
-        function fmt(v, cat) { return cat.kind === 'daily' ? v + ' Kč/d' : fmtCZK(v); }
+        /* 2. Invalidita I., II., III. stupně */
+        const inv3Cur = effectiveInv3Cover(cur);
+        const inv3Nw  = effectiveInv3Cover(nw);
+        const inv1Nw  = effectiveInv1Cover(nw);
+        if (inv3Cur < 500000 && inv3Nw >= 1500000) {
+            recos.push({ type: 'success', icon: 'shield-check',
+                text: `<strong>Zásadní posílení krytí invalidity:</strong> Stávající portfolio krylo invaliditu pouze na ${fmtCZK(inv3Cur)}, návrh poradce ji navyšuje na <strong>${fmtCZK(inv3Nw)}</strong>${inv1Nw > 0 ? ` (včetně I. stupně na ${fmtCZK(inv1Nw)})` : ''}.` });
+        } else if (loans > 0 && inv3Nw < loans * 0.5) {
+            recos.push({ type: 'warning', icon: 'shield-alert',
+                text: `<strong>Nízké krytí invalidity vůči závazkům:</strong> Navržená invalidita (${fmtCZK(inv3Nw)}) nedosahuje ani 50 % výše úvěrů (${fmtCZK(loans)}).` });
+        }
 
-        if (!recos.length) {
-            recos.push({ type: 'success', icon: 'check-circle', text: 'Portfolio vypadá vyrovnaně. Pro detailní vyhodnocení použijte AI analýzu.' });
+        /* 3. Kontrola zachovaných smluv (zdravotní stav / čekací doby) */
+        const keptContracts = (filter === 'ALL' ? state.currentContracts : cur).filter(c => c.actionStatus === 'keep');
+        if (keptContracts.length > 0) {
+            recos.push({ type: 'info', icon: 'lock',
+                text: `<strong>Ochrana zdravotní historie (Ponechané smlouvy: ${keptContracts.length}×):</strong> Poradce doporučuje ponechat smlouvy ${keptContracts.map(k => `<em>${escapeHtml(k.insurer)} č. ${escapeHtml(k.contractNo)}</em>`).join(', ')} beze změny, aby klient nepřišel o bezvýlukové krytí sjednané v minulosti.` });
+        }
+
+        /* 4. Bezpečný přechod u rušených smluv */
+        const canceledContracts = (filter === 'ALL' ? state.currentContracts : cur).filter(c => c.actionStatus === 'cancel' || c.actionStatus === 'consolidate');
+        if (canceledContracts.length > 0) {
+            recos.push({ type: 'warning', icon: 'clock',
+                text: `<strong>Bezpečný postup při rušení starých smluv (${canceledContracts.length}×):</strong> Výpověď smluv (${canceledContracts.map(k => escapeHtml(k.contractNo || k.insurer)).join(', ')}) podejte <strong>až po potvrzení přijetí nové smlouvy do pojištění</strong> (dokončení lékařského/finančního ocenění).` });
         }
 
         document.getElementById('recommendationsList').innerHTML = recos.map(r =>
@@ -995,53 +2157,6 @@
         if (window.lucide) lucide.createIcons();
     }
 
-    function findDuplicates(list) {
-        const out = [];
-        /* Stejná pojišťovna + osoba + kategorie s velmi blízkou hodnotou = duplicita? */
-        const byClient = {};
-        list.forEach(c => { (byClient[c.clientId] = byClient[c.clientId] || []).push(c); });
-        for (const cid in byClient) {
-            const arr = byClient[cid];
-            if (arr.length < 2) continue;
-            const insurers = new Set(arr.map(a => a.insurer || ''));
-            if (insurers.size === 1 && arr.length >= 3) {
-                out.push(`Osoba <strong>${escapeHtml(clientName(cid))}</strong> má <strong>${arr.length} smluv u jediné pojišťovny (${escapeHtml([...insurers][0] || 'neuvedeno')})</strong> — zvažte konsolidaci.`);
-            }
-        }
-        return out;
-    }
-
-    function renderCategoryChart(cur, nw) {
-        const ctx = document.getElementById('categoryChart');
-        if (!ctx) return;
-        const labels = D.CATEGORIES.map(c => c.short);
-        const dataCur = D.CATEGORIES.map(c => cur.reduce((s, x) => s + num(x.items && x.items[c.key]), 0));
-        const dataNw  = D.CATEGORIES.map(c => nw.reduce((s, x) => s + num(x.items && x.items[c.key]), 0));
-
-        if (chartInstance) chartInstance.destroy();
-        chartInstance = new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels,
-                datasets: [
-                    { label: 'Stávající', data: dataCur, backgroundColor: 'rgba(16,185,129,0.7)', borderColor: 'rgba(16,185,129,1)', borderWidth: 1 },
-                    { label: 'Návrh',     data: dataNw,  backgroundColor: 'rgba(14,165,233,0.7)', borderColor: 'rgba(14,165,233,1)', borderWidth: 1 }
-                ]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: {
-                    legend: { labels: { color: '#cbd5e1', font: { size: 11 } } },
-                    tooltip: { callbacks: { label: (ctx) => ctx.dataset.label + ': ' + fmtCZK(ctx.parsed.y) } }
-                },
-                scales: {
-                    x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: 'rgba(30,41,59,0.5)' } },
-                    y: { ticks: { color: '#64748b', font: { size: 10 }, callback: (v) => v >= 1e6 ? (v/1e6)+'M' : v >= 1e3 ? (v/1e3)+'k' : v }, grid: { color: 'rgba(30,41,59,0.5)' } }
-                }
-            }
-        });
-    }
-
     /* ════════════ AI / GROQ ════════════ */
     function getApiKey() { return lsGet('groq_api_key') || getCookie('groq_api_key') || ''; }
     function getModel()  { return lsGet('groq_model') || 'llama-3.3-70b-versatile'; }
@@ -1049,121 +2164,54 @@
     function buildPortfolioContext() {
         const totalCurMonthly = totalPremiumMonthly(state.currentContracts);
         const totalNewMonthly = totalPremiumMonthly(state.proposedContracts);
-        const summary = {
+        return {
             klienti: state.clients.map(c => ({
-                jmeno: c.name, rok_narozeni: c.birthYear, hruby_prijem_mesicni_kc: c.incomeGross,
-                OSVC: c.isEntrepreneur,
-                pocet_stavajicich_smluv: state.currentContracts.filter(s => s.clientId === c.id).length,
-                pocet_navrh_smluv: state.proposedContracts.filter(s => s.clientId === c.id).length
+                jmeno: c.name, role: c.role, rok_narozeni: c.birthYear,
+                hruby_prijem_kc: c.incomeGross, cisty_prijem_kc: D.computeNetIncome(c.incomeGross, c.isEntrepreneur),
+                OSVC: c.isEntrepreneur, poznamka: c.notes
             })),
             uvery_celkem_kc: sumLoans(),
-            uvery_polozky: state.loans.map(l => ({ nazev: l.name, vyse_kc: l.amount, klient: clientName(l.linkedClientId) })),
+            uvery_polozky: state.loans.map(l => ({ nazev: l.name, vyse_kc: l.amount, splatka_kc: l.monthlyPayment, klient: clientName(l.linkedClientId) })),
             stavajici_smlouvy: state.currentContracts.map(c => ({
                 klient: clientName(c.clientId), pojistovna: c.insurer, cislo: c.contractNo,
-                pocatek: c.start, konec: c.end, platba_mesicni_kc: c.premium,
+                doporuceni_poradce: c.actionStatus, duvod: c.actionReason || c.note,
+                platba_mesicni_kc: contractMonthlyPremium(c),
                 kryti: Object.fromEntries(D.CATEGORIES.map(cat => [cat.short, c.items && c.items[cat.key] || 0]).filter(([_, v]) => v > 0)),
-                podminky: c.conditions, poznamka: c.note
+                podminky: c.conditions
             })),
             navrhovane_smlouvy: state.proposedContracts.map(c => ({
                 klient: clientName(c.clientId), pojistovna: c.insurer, cislo: c.contractNo,
-                pocatek: c.start, konec: c.end, platba_mesicni_kc: c.premium,
+                status_v_navrhu: c.proposalStatus, duvod: c.actionReason || c.note,
+                platba_mesicni_kc: contractMonthlyPremium(c),
                 kryti: Object.fromEntries(D.CATEGORIES.map(cat => [cat.short, c.items && c.items[cat.key] || 0]).filter(([_, v]) => v > 0)),
-                podminky: c.conditions, poznamka: c.note
+                podminky: c.conditions
             })),
             celkove_mesicni_platby: { stavajici: totalCurMonthly, navrh: totalNewMonthly, rozdil: totalNewMonthly - totalCurMonthly },
-            zadani_poradce: state.adviserBrief
+            zadani_klienta: state.adviserBrief,
+            hlavni_doporuceni_poradce: state.advisorRecommendation
         };
-        return summary;
     }
 
     function aiPrompt(taskType, customQ) {
-        const portfolio = buildPortfolioContext();
-        const portfolioJson = JSON.stringify(portfolio, null, 2);
-
-        const sys = `Jsi zkušený český investiční poradce a expert na životní a úrazové pojištění. Mluvíš česky, věcně, bez marketingových frází. Odpovídáš v Markdown. Kde uvádíš čísla, používej český formát s mezerou jako oddělovačem tisíců a "Kč" jako symbol.
-
-Znáš relevantní legislativu (zákon č. 277/2009 Sb., zákon č. 170/2018 Sb., občanský zákoník §§ 2756–2872, doporučení ČNB) a obchodní podmínky velkých českých pojišťoven (Kooperativa, Allianz, Generali ČP, ČSOB Pojišťovna, NN, Uniqa, Komerční pojišťovna, Simplea).
-
-Tvým úkolem je posuzovat portfolio pojištění pro investičního poradce, který připravuje konzultaci pro klienta.`;
-
+        const portfolioJson = JSON.stringify(buildPortfolioContext(), null, 2);
+        const sys = `Jsi zkušený český finanční a pojistný poradce (standard EFPA ČR) a metodik životního pojištění. Mluvíš česky, věcně a strukturovaně v Markdownu. Čísla formátuj s mezerou (např. 3 000 000 Kč). Znáš zákon č. 170/2018 Sb., občanský zákoník, redukční hranice ČSSZ 2026 a produkty českých pojišťoven.`;
         const tasks = {
-            overall: `### ÚKOL: Celkové vyhodnocení portfolia
-
-Projdi předložené portfolio (stávající i navrhované) a vyhodnoť:
-1. **Vhodnost návrhu vs. cíl/zadání poradce** — jak moc návrh odpovídá zadání.
-2. **Klíčové slabiny stávajícího stavu** (max 5 bodů).
-3. **Co konkrétně návrh zlepšuje** (max 5 bodů).
-4. **Co návrh řeší hůře nebo zhoršuje** (pokud něco).
-5. **Konkrétní doporučení k úpravě návrhu** (max 5 bodů).
-6. **Cost/benefit shrnutí** — vyplatí se změna?
-
-Vyjadřuj se konkrétně, odkazuj na čísla z portfolia.`,
-            underinsurance: `### ÚKOL: Analýza podpojištění / přepojištění
-
-Pro každou osobu posuzuj:
-- Vztah krytí smrti k závazkům (úvěry).
-- Vztah krytí invalidity k závazkům a měsíčnímu příjmu.
-- Závažné onemocnění — má klient dostatek?
-- PN — pokrývá výpadek příjmů?
-- Hospitalizace / chirurgie — dostatečně?
-
-Najdi konkrétní mezery a uvádej **konkrétní doporučené částky** (s odůvodněním).`,
-            conditions: `### ÚKOL: Detailní analýza podmínek smluv
-
-Projdi pole \`podminky\` u každé smlouvy a vyhodnoť:
-- Klauzule PN (od kterého dne, zpětně?) — vyhovuje povolání a OSVČ statusu klienta?
-- Čekací doby (hospitalizace, závažné onemocnění) — odpovídají běžné praxi?
-- Riziková kategorie povolání — je správná?
-- Frekvence placení — optimální?
-
-Označ smlouvy, kde podmínky <strong>nevyhovují cíli klienta</strong> a navrhni úpravu.`,
-            cost: `### ÚKOL: Cost-benefit analýza
-
-Detailně rozeber:
-1. **Cenu stávajícího × návrh** (měsíční, roční, rozdíl).
-2. **Co návrh přidává nad rámec stávajícího** (nové kategorie, vyšší limity).
-3. **Co návrh ubírá** (vypuštěné kategorie / smlouvy).
-4. **Cenu za jednotku krytí** — který produkt je „levnější" za Kč krytí?
-5. **Návratnost při scénářích** — kdy se vyšší cena vyplatí?
-
-Buduj argumentaci pro klienta proč ANO / NE změnu provést.`,
-            legal: `### ÚKOL: Soulad se zákonem o pojišťovnictví a doporučeními ČNB
-
-Vyhodnoť:
-1. Není v návrhu „churning" (nevýhodná výměna smlouvy bez prokazatelného benefitu)?
-2. Odpovídá návrh testu vhodnosti (věk, příjem, závazky, závislé osoby)?
-3. Jsou splněny daňové podmínky pro odečet do 48 000 Kč ročně (pokud relevantní)?
-4. Není klient přepojištěn / podpojištěn dle ČNB best-practice?
-5. Co bys měl jako poradce zaznamenat do **Záznamu z jednání** (§ 79 zákona 170/2018)?
-
-Konkrétně cituj relevantní paragrafy a doporučení.`,
-            custom: `### ÚKOL: Vlastní dotaz
-
-${customQ || '(uživatel nezadal dotaz)'}`
+            overall: `Proveď komplexní vyhodnocení stávajícího a navrhovaného portfolia vůči zadání klienta a úvěrům. Vyzdvihni klíčové slabiny stávajícího stavu, přínosy návrhu poradce, ochranu zdravotní historie (ponechané smlouvy) a případné návrhy na doladění.`,
+            underinsurance: `Detailně posuď každou osobu z hlediska podpojištění či přepojištění (smrt konstantní + klesající vs. úvěry, invalidita I.–III. st., závažná onemocnění, TN s progresí, PN a OČR). Uveď konkrétní čísla.`,
+            conditions: `Zhodnoť pojistné podmínky smluv: progresi TN (400 % vs. 800/1000 %), klauzuli PN zpětně od 1. dne, krytí psychických onemocnění a zad, čekací doby při přechodu mezi smlouvami.`,
+            cost: `Zpracuj přesvědčivou Cost-Benefit analýzu pro klienta: co přesně klient získává za rozdíl v měsíčním pojistném, jak fungují klesající částky k hypotéce a jak využít příspěvek zaměstnavatele a daňový odpočet.`,
+            legal: `Připrav strukturovaný text přímo do **Záznamu z jednání dle § 79 zákona č. 170/2018 Sb.**: 1) Požadavky a cíle klienta, 2) Zjištěná fakta a analýza potřeb, 3) Konkrétní doporučení poradce (které smlouvy ponechat, které vypovědět a které nově sjednat), 4) Odůvodnění vhodnosti a upozornění na čekací doby.`,
+            custom: customQ || 'Zhodnoť toto portfolio.'
         };
-
-        const user = `${tasks[taskType] || tasks.overall}
-
----
-
-### DATA O PORTFOLIU (JSON, česky)
-
-\`\`\`json
-${portfolioJson}
-\`\`\`
-
----
-
-Odpověz v Markdownu. Buď konkrétní, věcný, odkazuj na čísla. Nezačínej zdvořilostmi typu „Děkuji za data".`;
         return [
             { role: 'system', content: sys },
-            { role: 'user',   content: user }
+            { role: 'user', content: `${tasks[taskType] || tasks.overall}\n\n### DATA PORTFOLIA:\n\`\`\`json\n${portfolioJson}\n\`\`\`` }
         ];
     }
 
     async function callGroq(messages) {
         const apiKey = getApiKey();
-        if (!apiKey) throw new Error('Není nastaven Groq API klíč (záložka Nastavení).');
+        if (!apiKey) throw new Error('Není nastaven Groq API klíč (záložka Nastavení & Tisk).');
         const model = getModel();
         const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
@@ -1179,7 +2227,6 @@ Odpověz v Markdownu. Buď konkrétní, věcný, odkazuj na čísla. Nezačínej
     }
 
     function markdownToHtml(md) {
-        /* Velmi jednoduchý MD→HTML převod (žádné DOMPurify, ale escapujeme přede a renderujeme jen bezpečné tagy) */
         let s = escapeHtml(md);
         s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
         s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
@@ -1187,16 +2234,10 @@ Odpověz v Markdownu. Buď konkrétní, věcný, odkazuj na čísla. Nezačínej
         s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
         s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
         s = s.replace(/^---$/gm, '<hr>');
-        /* lists */
         s = s.replace(/(^|\n)([-*]) (.+(?:\n[-*] .+)*)/g, (m, pre, _, items) => {
             const li = items.split(/\n[-*] /).map(t => '<li>' + t.replace(/^[-*] /, '') + '</li>').join('');
             return pre + '<ul>' + li + '</ul>';
         });
-        s = s.replace(/(^|\n)(\d+\.) (.+(?:\n\d+\. .+)*)/g, (m, pre, _, items) => {
-            const li = items.split(/\n\d+\. /).map(t => '<li>' + t.replace(/^\d+\. /, '') + '</li>').join('');
-            return pre + '<ol>' + li + '</ol>';
-        });
-        /* paragraphs */
         s = s.split(/\n\n+/).map(p => {
             if (/^<(h\d|ul|ol|hr|pre|blockquote)/.test(p.trim())) return p;
             return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
@@ -1218,21 +2259,18 @@ Odpověz v Markdownu. Buď konkrétní, věcný, odkazuj na čísla. Nezačínej
         } catch (e) {
             out.innerHTML = `<div class="reco reco-danger">
                 <span class="reco-icon"><i data-lucide="alert-octagon" class="w-4 h-4"></i></span>
-                <div><strong>Chyba volání AI:</strong> ${escapeHtml(e.message || String(e))}<br>
-                <span class="text-[11px] text-slate-500">Zkontrolujte API klíč v záložce Nastavení. Klíč získáte zdarma na console.groq.com/keys.</span></div>
+                <div><strong>Chyba volání AI:</strong> ${escapeHtml(e.message || String(e))}</div>
             </div>`;
             if (window.lucide) lucide.createIcons();
         } finally {
             btn.disabled = false;
         }
     }
+
     function renderAiPanel() {
         const sel = document.getElementById('aiTaskType');
         const custom = document.getElementById('aiCustomQuestion');
-        sel.addEventListener('change', () => {
-            custom.classList.toggle('hidden', sel.value !== 'custom');
-        }, { once: true });
-        custom.classList.toggle('hidden', sel.value !== 'custom');
+        if (sel && custom) custom.classList.toggle('hidden', sel.value !== 'custom');
     }
     function openAiPanel() { switchTab('ai'); }
 
@@ -1258,48 +2296,29 @@ Odpověz v Markdownu. Buď konkrétní, věcný, odkazuj na čísla. Nezačínej
             const insurerList = D.INSURER_NAMES.join(', ');
             const categoryList = D.CATEGORIES.map(c => `${c.key} (${c.label})`).join(', ');
             const messages = [
-                { role: 'system', content: `Jsi parser pojistných smluv. Z volně zadaného textu vytvoříš strukturované JSON. Mluvíš česky a striktně vracíš jen platný JSON, nic víc.` },
-                { role: 'user',   content: `Pojistné kategorie (klíče): ${categoryList}.
-Dostupné pojišťovny: ${insurerList}.
-Dostupní klienti (id = jméno): ${clientList}.
-
-Vrať POUZE pole objektů (JSON array), kde každý objekt má:
-{ "clientName": "...", "insurer": "...", "contractNo": "...", "start": rok_nebo_null, "end": rok_nebo_null, "premium": cislo_mesicne, "items": { "smrt": 0, ... }, "note": "..." }
-
-clientName přiřaď podle existujících klientů, pokud poznáš, jinak zachovej z textu.
-items: vyplň pouze klíče, které jsou v textu zmíněny, ostatní nech 0.
-
-TEXT KE ZPRACOVÁNÍ:
-${input}` }
+                { role: 'system', content: `Jsi parser pojistných smluv. Z volně zadaného textu vytvoříš strukturované JSON pole. Vracíš POUZE platný JSON array.` },
+                { role: 'user', content: `Pojistné kategorie (klíče): ${categoryList}.\nPojišťovny: ${insurerList}.\nKlienti: ${clientList}.\n\nVrať JSON pole objektů: [{ "clientName": "...", "insurer": "...", "contractNo": "...", "start": rok, "end": rok, "premium": cislo_mesicne, "items": { "smrt": 0, ... }, "note": "..." }]\n\nTEXT:\n${input}` }
             ];
             const text = await callGroq(messages);
             const match = text.match(/\[[\s\S]*\]/);
             if (!match) throw new Error('AI nevrátila JSON pole.');
             const parsed = JSON.parse(match[0]);
-            if (!Array.isArray(parsed)) throw new Error('JSON není pole.');
-
             let added = 0;
             parsed.forEach(item => {
                 const target = bulkTarget === 'current' ? state.currentContracts : state.proposedContracts;
-                /* Najdi clienta */
-                let clientId = '';
+                let clientId = state.clients[0] ? state.clients[0].id : '';
                 if (item.clientName) {
-                    const found = state.clients.find(c => c.name.toLowerCase() === String(item.clientName).toLowerCase());
+                    const found = state.clients.find(c => c.name.toLowerCase().includes(String(item.clientName).toLowerCase()));
                     if (found) clientId = found.id;
-                    else {
-                        /* Vytvoř nového klienta */
-                        const c = { id: uid(), name: item.clientName, incomeGross: 0, isEntrepreneur: false };
-                        state.clients.push(c); clientId = c.id;
-                    }
-                } else if (state.clients[0]) clientId = state.clients[0].id;
-
-                const newC = emptyContract(clientId);
+                }
+                const newC = emptyContract(clientId, bulkTarget);
                 newC.insurer = item.insurer || '';
                 newC.contractNo = item.contractNo || '';
                 newC.start = item.start || null;
                 newC.end   = item.end   || null;
                 newC.premium = num(item.premium);
                 newC.note = item.note || '';
+                newC.actionReason = item.note || '';
                 if (item.items) {
                     D.CATEGORIES.forEach(cat => {
                         if (item.items[cat.key] != null) newC.items[cat.key] = num(item.items[cat.key]);
@@ -1308,9 +2327,7 @@ ${input}` }
                 target.push(newC);
                 added++;
             });
-            save();
-            closeBulkModal();
-            renderAll();
+            save(); closeBulkModal(); renderAll();
             toast(`AI naimportovala ${added} smluv`, 'success');
         } catch (e) {
             toast('Chyba parsování: ' + e.message, 'error');
@@ -1319,46 +2336,91 @@ ${input}` }
         }
     }
 
-    /* ════════════ LEGAL ════════════ */
+    /* ════════════ LEGAL & INSURERS CATALOG ════════════ */
     function renderLegal() {
-        document.getElementById('legalContent').innerHTML = D.LEGAL_FRAMEWORK.map(b =>
-            `<div class="legal-block"><h3>${escapeHtml(b.title)}</h3>${b.body}</div>`).join('');
+        const catEl = document.getElementById('insurersCatalogContent');
+        if (catEl) {
+            catEl.innerHTML = `
+                <div class="overflow-x-auto">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Pojišťovna</th>
+                                <th>Vlajkový produkt (2026)</th>
+                                <th class="num">Max. progrese TN</th>
+                                <th>Silné stránky a výhody</th>
+                                <th>Specifika / na co dát pozor</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${D.INSURERS.map(ins => `
+                                <tr>
+                                    <td><strong class="text-slate-100">${escapeHtml(ins.name)}</strong> <span class="badge badge-sky ml-1">${escapeHtml(ins.short)}</span></td>
+                                    <td class="text-sky-300 font-medium">${escapeHtml(ins.productLine)}</td>
+                                    <td class="num font-bold text-amber-300">${ins.defaultConditions.tnProgression || 800} %</td>
+                                    <td class="text-slate-300 text-[11px]">${escapeHtml(ins.strengths || ins.notes)}</td>
+                                    <td class="text-slate-400 text-[11px]">${escapeHtml(ins.weaknesses || '—')}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        }
+        const legEl = document.getElementById('legalContent');
+        if (legEl) {
+            legEl.innerHTML = D.LEGAL_FRAMEWORK.map(b =>
+                `<div class="legal-block"><h3>${escapeHtml(b.title)}</h3>${b.body}</div>`).join('');
+        }
     }
 
-    /* ════════════ SETTINGS ════════════ */
+    /* ════════════ SETTINGS & BRANDING ════════════ */
     function renderSettings() {
-        document.getElementById('setGroqKey').value = getApiKey();
-        document.getElementById('setGroqModel').value = getModel();
-        const an = document.getElementById('setAdvisorName');
-        const lu = document.getElementById('setLogoUrl');
-        if (an) an.value = state.advisorName || '';
-        if (lu) lu.value = state.logoUrl || '';
+        const setVal = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || ''; };
+        setVal('setGroqKey', getApiKey());
+        setVal('setGroqModel', getModel());
+        setVal('setAdvisorName', state.advisorName);
+        setVal('setAdvisorCompany', state.advisorCompany || DEFAULT_COMPANY);
+        setVal('setAdvisorIco', state.advisorIco);
+        setVal('setAdvisorPhone', state.advisorPhone);
+        setVal('setAdvisorEmail', state.advisorEmail);
+        setVal('setModelId', state.modelId);
+        setVal('setLogoUrl', state.logoUrl);
         refreshLogoPreview();
         updateStoragePreview();
     }
+
     function saveSettings() {
         const key = document.getElementById('setGroqKey').value.trim();
         const model = document.getElementById('setGroqModel').value;
         lsSet('groq_api_key', key);
         setCookie('groq_api_key', key, 365);
         lsSet('groq_model', model);
-        toast('Nastavení uloženo (sdíleno s Finance Terminalem)', 'success');
+        toast('Nastavení AI uloženo', 'success');
     }
+
     function savePrintBranding() {
-        const an = document.getElementById('setAdvisorName');
-        const lu = document.getElementById('setLogoUrl');
-        state.advisorName = an ? an.value.trim() : '';
-        // Pokud user vymaže URL, vrátíme se k defaultu; jinak respektujeme jeho hodnotu.
-        const luVal = lu ? lu.value.trim() : '';
-        state.logoUrl = luVal || DEFAULT_LOGO_URL;
-        // Cookie zálohy (pojistka proti smazání localStorage)
-        setCookie('insurance_logo_url', state.logoUrl, 365);
+        const g = id => document.getElementById(id)?.value.trim() || '';
+        state.advisorName    = g('setAdvisorName');
+        state.advisorCompany = g('setAdvisorCompany');
+        state.advisorIco     = g('setAdvisorIco');
+        state.advisorPhone   = g('setAdvisorPhone');
+        state.advisorEmail   = g('setAdvisorEmail');
+        state.modelId        = g('setModelId') || 'MOD-2026-01';
+        const luVal          = g('setLogoUrl');
+        state.logoUrl        = luVal || DEFAULT_LOGO_URL;
+
         setCookie('insurance_advisor_name', state.advisorName, 365);
+        setCookie('insurance_advisor_company', state.advisorCompany, 365);
+        setCookie('insurance_advisor_ico', state.advisorIco, 365);
+        setCookie('insurance_advisor_phone', state.advisorPhone, 365);
+        setCookie('insurance_advisor_email', state.advisorEmail, 365);
+        setCookie('insurance_model_id', state.modelId, 365);
+        setCookie('insurance_logo_url', state.logoUrl, 365);
         save();
         refreshLogoPreview();
-        // Pokud uživatel vymazal pole, hned mu tam ukážeme default zpátky
-        if (lu && !luVal) lu.value = state.logoUrl;
     }
+
     function refreshLogoPreview() {
         const wrap = document.getElementById('logoPreview');
         const img = document.getElementById('logoPreviewImg');
@@ -1369,10 +2431,14 @@ ${input}` }
         img.onload = () => { wrap.classList.remove('hidden'); };
         img.src = url;
     }
+
     function updateStoragePreview() {
         const el = document.getElementById('storagePreview');
-        if (el) el.textContent = JSON.stringify(state, null, 2).slice(0, 4000) + (JSON.stringify(state).length > 4000 ? '\n…(zkráceno)' : '');
+        if (!el) return;
+        const s = JSON.stringify(state, null, 2);
+        el.textContent = s.slice(0, 4000) + (s.length > 4000 ? '\n…(zkráceno)' : '');
     }
+
     function setTheme(t) {
         document.documentElement.classList.toggle('light', t === 'light');
         document.documentElement.classList.toggle('dark', t === 'dark');
@@ -1385,31 +2451,880 @@ ${input}` }
         if (t === 'light') document.documentElement.classList.add('light');
     }
 
-    /* ════════════ EXPORT / IMPORT / RESET ════════════ */
+    /* ════════════ EXPORT / IMPORT / RESET / PRINT ════════════ */
+    function buildExportFilename(ext) {
+        const date = new Date().toISOString().slice(0, 10);
+        let name = state.clients[0]?.name ? state.clients[0].name.trim() : 'Portfolio';
+        name = name.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
+        return `${date} Srovnani ZP - ${name}.${ext || 'json'}`;
+    }
     function exportData() {
         const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = buildExportFilename();
+        a.download = buildExportFilename('json');
         a.click();
         URL.revokeObjectURL(url);
-        toast('Export hotov', 'success');
+        toast('Export JSON hotov', 'success');
     }
 
-    /* Jméno souboru ve formátu „YYYY-MM-DD Jméno.json".
-       Jméno = hlavní klient (první v seznamu). Sanitizujeme znaky nepřípustné
-       ve Windows / macOS / Linux souborových názvech. */
-    function buildExportFilename() {
-        const date = new Date().toISOString().slice(0,10);
-        let name = '';
-        if (Array.isArray(state.clients) && state.clients.length > 0) {
-            name = (state.clients[0].name || '').trim();
+    async function ensureExcelJS() {
+        if (window.ExcelJS) return window.ExcelJS;
+        return new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
+            s.onload = () => window.ExcelJS ? resolve(window.ExcelJS) : reject(new Error('ExcelJS se nepodařilo inicializovat.'));
+            s.onerror = () => reject(new Error('Nelze načíst knihovnu ExcelJS z CDN. Zkontrolujte připojení k internetu.'));
+            document.head.appendChild(s);
+        });
+    }
+
+    function excelColName(n) {
+        let s = '';
+        while (n > 0) {
+            const m = (n - 1) % 26;
+            s = String.fromCharCode(65 + m) + s;
+            n = Math.floor((n - 1) / 26);
         }
-        // Sanitize — zakázané znaky ve filenamu: \ / : * ? " < > |
-        name = name.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
-        if (!name) return date + ' Portfolio.json';
-        return date + ' ' + name + '.json';
+        return s;
+    }
+
+    async function exportXlsx() {
+        try {
+            toast('Generuji strukturovaný Excel (.xlsx)…', 'info');
+            const ExcelJS = await ensureExcelJS();
+            const wb = new ExcelJS.Workbook();
+            const today = new Date().toLocaleDateString('cs-CZ');
+            const advName = (state.advisorName || '').trim() || 'Finanční a pojistný poradce';
+            const advCompany = (state.advisorCompany || '').trim() || DEFAULT_COMPANY;
+            const modId = (state.modelId || '').trim() || 'MOD-2026-01';
+
+            wb.creator = `${advName} (${advCompany})`;
+            wb.lastModifiedBy = advName;
+            wb.created = new Date();
+            wb.modified = new Date();
+
+            /* ── Stylové palety a pomocné funkce ── */
+            const FONT = 'Segoe UI';
+            const borderThin = {
+                top:    { style: 'thin', color: { argb: 'FFCBD5E1' } },
+                left:   { style: 'thin', color: { argb: 'FFCBD5E1' } },
+                bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+                right:  { style: 'thin', color: { argb: 'FFCBD5E1' } }
+            };
+            const borderHeader = {
+                top:    { style: 'thin', color: { argb: 'FF475569' } },
+                left:   { style: 'thin', color: { argb: 'FF64748B' } },
+                bottom: { style: 'medium', color: { argb: 'FF0F172A' } },
+                right:  { style: 'thin', color: { argb: 'FF64748B' } }
+            };
+            const borderTotal = {
+                top:    { style: 'thin', color: { argb: 'FF1E3A8A' } },
+                left:   { style: 'thin', color: { argb: 'FF93C5FD' } },
+                bottom: { style: 'double', color: { argb: 'FF1E3A8A' } },
+                right:  { style: 'thin', color: { argb: 'FF93C5FD' } }
+            };
+
+            const FMT_CZK = '#,##0 "Kč"';
+            const FMT_CZK_DELTA = '+#,##0 "Kč";-#,##0 "Kč";"0 Kč"';
+            const FMT_DAILY = '#,##0 "Kč/den"';
+            const FMT_DAILY_DELTA = '+#,##0 "Kč/den";-#,##0 "Kč/den";"0 Kč/den"';
+            const FMT_MONTHLY = '#,##0 "Kč/měs"';
+            const FMT_MONTHLY_DELTA = '+#,##0 "Kč/měs";-#,##0 "Kč/měs";"0 Kč/měs"';
+            const FMT_PCT = '0.0 %';
+
+            function catFmt(cat, isDelta) {
+                if (!cat) return isDelta ? FMT_CZK_DELTA : FMT_CZK;
+                if (cat.kind === 'daily') return isDelta ? FMT_DAILY_DELTA : FMT_DAILY;
+                if (cat.kind === 'monthly') return isDelta ? FMT_MONTHLY_DELTA : FMT_MONTHLY;
+                return isDelta ? FMT_CZK_DELTA : FMT_CZK;
+            }
+
+            function addSheetBanner(ws, title, subtitle, maxCols) {
+                const endCol = excelColName(maxCols);
+                const r1 = ws.addRow([title]);
+                ws.mergeCells(`A${r1.number}:${endCol}${r1.number}`);
+                r1.height = 30;
+                r1.getCell(1).font = { name: FONT, size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+                r1.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F172A' } };
+                r1.getCell(1).alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+
+                const metaLine = `${subtitle}   |   ID modelace: ${modId}   |   Zpracoval: ${advName} (${advCompany})${state.advisorPhone ? ' · Tel: ' + state.advisorPhone : ''}${state.advisorEmail ? ' · ' + state.advisorEmail : ''}   |   Datum: ${today}`;
+                const r2 = ws.addRow([metaLine]);
+                ws.mergeCells(`A${r2.number}:${endCol}${r2.number}`);
+                r2.height = 20;
+                r2.getCell(1).font = { name: FONT, size: 9.5, italic: true, color: { argb: 'FFBAE6FD' } };
+                r2.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+                r2.getCell(1).alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+
+                const r3 = ws.addRow([]);
+                r3.height = 8;
+            }
+
+            function addSectionBar(ws, title, maxCols, bgArgb) {
+                const endCol = excelColName(maxCols);
+                const r = ws.addRow([title]);
+                ws.mergeCells(`A${r.number}:${endCol}${r.number}`);
+                r.height = 23;
+                r.getCell(1).font = { name: FONT, size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
+                r.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgArgb || 'FF0369A1' } };
+                r.getCell(1).alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+                return r;
+            }
+
+            function styleTableHeader(row, maxCols, alignMap) {
+                row.height = 24;
+                for (let c = 1; c <= maxCols; c++) {
+                    const cell = row.getCell(c);
+                    cell.font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+                    cell.border = borderHeader;
+                    cell.alignment = {
+                        vertical: 'middle',
+                        horizontal: (alignMap && alignMap[c]) || 'left',
+                        wrapText: true
+                    };
+                }
+            }
+
+            function styleDataRow(row, maxCols, isEven, alignMap) {
+                row.height = 20;
+                const bg = isEven ? 'FFF8FAFC' : 'FFFFFFFF';
+                for (let c = 1; c <= maxCols; c++) {
+                    const cell = row.getCell(c);
+                    cell.font = { name: FONT, size: 9.5, color: { argb: 'FF1E293B' } };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
+                    cell.border = borderThin;
+                    cell.alignment = {
+                        vertical: 'middle',
+                        horizontal: (alignMap && alignMap[c]) || 'left',
+                        wrapText: true
+                    };
+                }
+            }
+
+            function styleTotalRow(row, maxCols, alignMap, bgArgb) {
+                row.height = 22;
+                const bg = bgArgb || 'FFDBEAFE';
+                for (let c = 1; c <= maxCols; c++) {
+                    const cell = row.getCell(c);
+                    cell.font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
+                    cell.border = borderTotal;
+                    cell.alignment = {
+                        vertical: 'middle',
+                        horizontal: (alignMap && alignMap[c]) || 'left'
+                    };
+                }
+            }
+
+            function applyStatusBadgeStyle(cell, statusKey) {
+                const map = {
+                    keep:        { bg: 'FFDCFCE7', fg: 'FF166534' },
+                    kept:        { bg: 'FFDCFCE7', fg: 'FF166534' },
+                    modify:      { bg: 'FFFEF3C7', fg: 'FF92400E' },
+                    cancel:      { bg: 'FFFFE4E6', fg: 'FF9F1239' },
+                    consolidate: { bg: 'FFF3E8FF', fg: 'FF6B21A8' },
+                    new:         { bg: 'FFE0F2FE', fg: 'FF075985' }
+                };
+                const st = map[statusKey] || map.keep;
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: st.bg } };
+                cell.font = { name: FONT, size: 9, bold: true, color: { argb: st.fg } };
+                cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            }
+
+            function applyDeltaStyle(cell, diffVal, invertGood) {
+                const isGood = invertGood ? diffVal < 0 : diffVal > 0;
+                const isBad  = invertGood ? diffVal > 0 : diffVal < 0;
+                if (isGood) {
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0FDF4' } };
+                    cell.font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF15803D' } };
+                } else if (isBad) {
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF2F2' } };
+                    cell.font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FFB91C1C' } };
+                } else {
+                    cell.font = { name: FONT, size: 9.5, color: { argb: 'FF64748B' } };
+                }
+            }
+
+            /* ── Souhrnná čísla pro sestavu ── */
+            const curM = totalMonthly(state.currentContracts);
+            const newM = totalMonthly(state.proposedContracts);
+            const diffM = newM - curM;
+            const loansTotal = totalLoans();
+            const curHealth = computeHealthScore(state.currentContracts);
+            const newHealth = computeHealthScore(state.proposedContracts);
+            const curSmrt = sumCategory(state.currentContracts, 'smrt') + sumCategory(state.currentContracts, 'smrtKles');
+            const newSmrt = sumCategory(state.proposedContracts, 'smrt') + sumCategory(state.proposedContracts, 'smrtKles');
+
+            const keptCount = (state.currentContracts || []).filter(c => c.actionStatus === 'keep' || c.actionStatus === 'modify').length;
+            const cancelCount = (state.currentContracts || []).filter(c => c.actionStatus === 'cancel' || c.actionStatus === 'consolidate').length;
+            const newContractCount = (state.proposedContracts || []).filter(c => c.proposalStatus === 'new').length;
+
+            /* ════════════════════════════════════════════════════════════════
+               LIST 1: 1. Přehled & Akční plán
+               ════════════════════════════════════════════════════════════════ */
+            const ws1 = wb.addWorksheet('1. Přehled & Akční plán', {
+                properties: { tabColor: { argb: 'FF0284C7' } },
+                views: [{ state: 'frozen', ySplit: 2, showGridLines: true }],
+                pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
+            });
+            ws1.columns = [
+                { width: 26 }, { width: 22 }, { width: 18 }, { width: 18 },
+                { width: 18 }, { width: 18 }, { width: 18 }, { width: 18 }, { width: 38 }
+            ];
+            addSheetBanner(ws1, 'SROVNÁNÍ A MODELACE ŽIVOTNÍHO POJIŠTĚNÍ — MANAŽERSKÝ PŘEHLED', 'Analytický podklad a akční plán smluv dle doporučení finančního poradce', 9);
+
+            /* Sekce 1A: KPI Přehled */
+            addSectionBar(ws1, '1. KLÍČOVÉ UKAZATELE MODELACE (FINANČNÍ BILANCE, SKÓRE ZDRAVÍ POJIŠTĚNÍ & KRYTÍ ÚVĚRŮ)', 9, 'FF0369A1');
+            const kpiHead = ws1.addRow(['Ukazatel portfolia', 'Stávající stav', 'Návrh poradce', 'Rozdíl (Δ)', 'Pilíř pojistné ochrany (0–100 %)', 'Stávající %', 'Návrh %', 'Posun', 'Komentář / Stav']);
+            styleTableHeader(kpiHead, 9, { 2: 'right', 3: 'right', 4: 'right', 6: 'right', 7: 'right', 8: 'right' });
+
+            const pillarNames = ['1. Smrt & Závazky', '2. Invalidita & Příjem', '3. Závažné nemoci', '4. Trvalé následky úrazu', '5. Krátkodobý příjem (PN)'];
+            const kpiRowsData = [
+                {
+                    label: 'Měsíční pojistné celkem', cur: curM, nw: newM, diff: diffM, fmt: FMT_CZK, dFmt: FMT_CZK_DELTA, inv: true,
+                    note: diffM <= 0 ? 'Úspora na měsíčním pojistném' : 'Investice do navýšení pojistné ochrany'
+                },
+                {
+                    label: 'Roční pojistné celkem', cur: curM * 12, nw: newM * 12, diff: diffM * 12, fmt: FMT_CZK, dFmt: FMT_CZK_DELTA, inv: true,
+                    note: `Ponecháno: ${keptCount}× | K výpovědi: ${cancelCount}× | Nové: ${newContractCount}×`
+                },
+                {
+                    label: 'Celkové krytí smrti (konst. + kles.)', cur: curSmrt, nw: newSmrt, diff: newSmrt - curSmrt, fmt: FMT_CZK, dFmt: FMT_CZK_DELTA, inv: false,
+                    note: loansTotal > 0 ? (newSmrt >= loansTotal ? `Plně pokrývá 100 % úvěrů (${fmtCZK(loansTotal)})` : `Pozor: úvěry činí ${fmtCZK(loansTotal)}`) : 'Bez evidovaných úvěrů'
+                },
+                {
+                    label: 'Krytí invalidity III. st. (konst. + kles.)',
+                    cur: sumCategory(state.currentContracts, 'invalidita') + sumCategory(state.currentContracts, 'invKles'),
+                    nw:  sumCategory(state.proposedContracts, 'invalidita') + sumCategory(state.proposedContracts, 'invKles'),
+                    diff: (sumCategory(state.proposedContracts, 'invalidita') + sumCategory(state.proposedContracts, 'invKles')) - (sumCategory(state.currentContracts, 'invalidita') + sumCategory(state.currentContracts, 'invKles')),
+                    fmt: FMT_CZK, dFmt: FMT_CZK_DELTA, inv: false,
+                    note: 'Klíčové krytí dlouhodobého výpadku příjmu'
+                },
+                {
+                    label: 'Celkové Skóre zdraví pojištění', cur: curHealth.total / 100, nw: newHealth.total / 100, diff: (newHealth.total - curHealth.total) / 100, fmt: FMT_PCT, dFmt: '+0.0 %;-0.0 %;0.0 %', inv: false,
+                    note: `Posun kvality portfolia z ${curHealth.total} % na ${newHealth.total} %`
+                }
+            ];
+
+            kpiRowsData.forEach((kr, idx) => {
+                const pCur = (curHealth.pillars[idx] || 0) / 100;
+                const pNew = (newHealth.pillars[idx] || 0) / 100;
+                const pDiff = pNew - pCur;
+                const r = ws1.addRow([kr.label, kr.cur, kr.nw, kr.diff, pillarNames[idx], pCur, pNew, pDiff, kr.note]);
+                styleDataRow(r, 9, idx % 2 === 1, { 2: 'right', 3: 'right', 4: 'right', 6: 'right', 7: 'right', 8: 'right' });
+                r.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                r.getCell(2).numFmt = kr.fmt;
+                r.getCell(3).numFmt = kr.fmt;
+                r.getCell(3).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                r.getCell(4).numFmt = kr.dFmt;
+                applyDeltaStyle(r.getCell(4), kr.diff, kr.inv);
+                r.getCell(5).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF334155' } };
+                r.getCell(6).numFmt = FMT_PCT;
+                r.getCell(7).numFmt = FMT_PCT;
+                r.getCell(7).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                r.getCell(8).numFmt = '+0.0 %;-0.0 %;0.0 %';
+                applyDeltaStyle(r.getCell(8), pDiff, false);
+            });
+
+            ws1.addRow([]).height = 10;
+
+            /* Sekce 1B: Zadání klienta & Doporučení poradce */
+            if (state.adviserBrief || state.advisorRecommendation) {
+                addSectionBar(ws1, '2. ZADÁNÍ KLIENTA A CELKOVÉ ODBORNÉ STANOVISKO FINANČNÍHO PORADCE', 9, 'FF1E3A8A');
+                if (state.adviserBrief) {
+                    const rb = ws1.addRow(['Zadání a požadavky klienta:', state.adviserBrief]);
+                    ws1.mergeCells(`B${rb.number}:I${rb.number}`);
+                    rb.height = Math.max(36, Math.ceil(state.adviserBrief.length / 110) * 16);
+                    styleDataRow(rb, 9, false);
+                    rb.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF075985' } };
+                    rb.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' } };
+                    rb.getCell(2).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+                }
+                if (state.advisorRecommendation) {
+                    const rr = ws1.addRow([`Doporučení poradce (${advName}, ${advCompany}):`, state.advisorRecommendation]);
+                    ws1.mergeCells(`B${rr.number}:I${rr.number}`);
+                    rr.height = Math.max(42, Math.ceil(state.advisorRecommendation.length / 110) * 16);
+                    styleDataRow(rr, 9, true);
+                    rr.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF166534' } };
+                    rr.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
+                    rr.getCell(2).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                    rr.getCell(2).alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+                }
+                ws1.addRow([]).height = 10;
+            }
+
+            /* Sekce 1C: Přehled osob a příjmů dle ČSSZ 2026 */
+            addSectionBar(ws1, '3. POSUZOVANÉ OSOBY, PŘÍJMY A ODHAD STÁTNÍCH DÁVEK ČSSZ (2026)', 9, 'FF0369A1');
+            const clHead = ws1.addRow([
+                'Jméno a příjmení', 'Role / Typ osoby', 'Rok nar. (Věk)', 'Režim příjmu',
+                'Hrubý příjem / měs', 'Čistý příjem / měs', 'Státní nemocenská / měs', 'Státní inv. důchod III. st.', 'Měsíční výdaje & Rezerva'
+            ]);
+            styleTableHeader(clHead, 9, { 3: 'center', 4: 'center', 5: 'right', 6: 'right', 7: 'right', 8: 'right' });
+
+            const curY = new Date().getFullYear();
+            (state.clients || []).forEach((c, idx) => {
+                const child = isChildPerson(c);
+                const age = c.birthYear ? (curY - c.birthYear) : null;
+                const netInc = child ? 0 : D.computeNetIncome(c.incomeGross, c.isEntrepreneur);
+                const sick = child ? { monthlyAvg: 0 } : D.computeExactSickLeave(c.incomeGross, c.isEntrepreneur, 60);
+                const inv3 = child ? 0 : D.computeStateDisabilityPension(c.incomeGross, 3, age || 40, c.isEntrepreneur);
+                const r = ws1.addRow([
+                    c.name || '—',
+                    child ? 'Dítě / Nezaopatřená osoba' : 'Dospělý (živitel)',
+                    c.birthYear ? `${c.birthYear} (${age} let)` : '—',
+                    child ? 'Dítě' : (c.isEntrepreneur ? 'OSVČ' : `Zaměstnanec (sk. ${c.occupationRisk || '1'})`),
+                    child ? 0 : num(c.incomeGross),
+                    netInc,
+                    sick.monthlyAvg,
+                    inv3,
+                    child ? (c.note || 'Dětský tarif') : `Výdaje: ${fmtCZK(c.expensesMonthly || 0)}/měs | Rezerva: ${fmtCZK(c.reserveCash || 0)}`
+                ]);
+                styleDataRow(r, 9, idx % 2 === 1, { 3: 'center', 4: 'center', 5: 'right', 6: 'right', 7: 'right', 8: 'right' });
+                r.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                [5, 6, 7, 8].forEach(colIdx => { r.getCell(colIdx).numFmt = FMT_CZK; });
+            });
+
+            ws1.addRow([]).height = 10;
+
+            /* Sekce 1D: Akční plán smluv (Stávající + Návrh) */
+            addSectionBar(ws1, '4. AKČNÍ PLÁN SMLUV — CO PONECHAT, CO VYPOVĚDĚT A CO SJEDNAT NOVĚ', 9, 'FF0F172A');
+            const actHead = ws1.addRow([
+                'Portfolio', 'Doporučená akce', 'Pojištěná osoba', 'Pojišťovna',
+                'Číslo smlouvy / Produkt', 'Platnost Od–Do', 'Měsíční pojistné', 'Progrese TN / PN', 'Zdůvodnění finančního poradce & Poznámka'
+            ]);
+            styleTableHeader(actHead, 9, { 2: 'center', 6: 'center', 7: 'right', 8: 'center' });
+
+            let actIdx = 0;
+            (state.currentContracts || []).forEach(c => {
+                const actKey = c.actionStatus || 'keep';
+                const actMeta = (D.CONTRACT_ACTIONS.current || []).find(a => a.key === actKey) || D.CONTRACT_ACTIONS.current[0];
+                const cond = c.conditions || {};
+                const r = ws1.addRow([
+                    'Stávající smlouva',
+                    actMeta.short,
+                    clientName(c.clientId),
+                    c.insurer || '—',
+                    c.contractNo || '—',
+                    `${c.start || '—'} – ${c.end || 'neurčito'}`,
+                    monthlyPremium(c),
+                    `TN ${cond.tnProgression || 100}% | PN od ${cond.pnFromDay || 29}.d`,
+                    c.actionReason || c.note || '—'
+                ]);
+                styleDataRow(r, 9, actIdx++ % 2 === 1, { 2: 'center', 6: 'center', 7: 'right', 8: 'center' });
+                applyStatusBadgeStyle(r.getCell(2), actKey);
+                r.getCell(7).numFmt = FMT_CZK;
+            });
+
+            (state.proposedContracts || []).forEach(c => {
+                const propKey = c.proposalStatus || 'new';
+                const propMeta = (D.CONTRACT_ACTIONS.proposed || []).find(a => a.key === propKey) || D.CONTRACT_ACTIONS.proposed[0];
+                const cond = c.conditions || {};
+                const r = ws1.addRow([
+                    'Návrh poradce',
+                    propMeta.short,
+                    clientName(c.clientId),
+                    c.insurer || '—',
+                    c.contractNo || 'Nová smlouva',
+                    `${c.start || '—'} – ${c.end || 'neurčito'}`,
+                    monthlyPremium(c),
+                    `TN ${cond.tnProgression || 800}% | PN od ${cond.pnFromDay || 29}.d${cond.pnRetroactive ? ' zpětně' : ''}`,
+                    c.actionReason || c.note || '—'
+                ]);
+                styleDataRow(r, 9, actIdx++ % 2 === 1, { 2: 'center', 6: 'center', 7: 'right', 8: 'center' });
+                applyStatusBadgeStyle(r.getCell(2), propKey);
+                r.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                r.getCell(7).numFmt = FMT_CZK;
+                r.getCell(7).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+            });
+
+            /* ════════════════════════════════════════════════════════════════
+               LIST 2: 2. Srovnání krytí (32 rizik + Rozpad po osobách)
+               ════════════════════════════════════════════════════════════════ */
+            const ws2 = wb.addWorksheet('2. Srovnání krytí (32 rizik)', {
+                properties: { tabColor: { argb: 'FF10B981' } },
+                views: [{ state: 'frozen', ySplit: 5, showGridLines: true }],
+                pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
+            });
+            ws2.columns = [
+                { width: 26 }, { width: 34 }, { width: 15 }, { width: 18 },
+                { width: 18 }, { width: 18 }, { width: 14 }, { width: 20 }, { width: 42 }
+            ];
+            addSheetBanner(ws2, 'POLOŽKOVÉ SROVNÁNÍ POJISTNÉHO KRYTÍ: STÁVAJÍCÍ STAV × NÁVRH PORADCE', 'Kompletní srovnání všech 32 pojistných kategorií v 6 skupinách rizik + rozpad po jednotlivých osobách', 9);
+            addSectionBar(ws2, 'ČÁST A: SOUHRNNÉ SROVNÁNÍ CELÉHO PORTFOLIA DLE SKUPIN POJISTNÝCH RIZIK', 9, 'FF047857');
+
+            const cmpHead = ws2.addRow([
+                'Skupina rizik', 'Pojistné riziko / kategorie', 'Typ plnění',
+                'Stávající stav', 'Návrh poradce', 'Rozdíl (Δ)', 'Změna (%)', 'Vyhodnocení změny', 'Popis a metodická poznámka'
+            ]);
+            styleTableHeader(cmpHead, 9, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'center' });
+
+            let cmpIdx = 0;
+            D.CATEGORY_GROUPS.forEach(grp => {
+                const grpCats = D.CATEGORIES.filter(c => c.group === grp.key);
+                /* Mezititulek skupiny */
+                const grRow = ws2.addRow([grp.label.toUpperCase()]);
+                ws2.mergeCells(`A${grRow.number}:I${grRow.number}`);
+                grRow.height = 20;
+                grRow.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF075985' } };
+                grRow.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' } };
+                grRow.getCell(1).border = borderThin;
+                grRow.getCell(1).alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+
+                grpCats.forEach(cat => {
+                    const curV = sumCategory(state.currentContracts, cat.key);
+                    const newV = sumCategory(state.proposedContracts, cat.key);
+                    const diffV = newV - curV;
+                    const pctV = curV > 0 ? (diffV / curV) : (newV > 0 ? 1 : 0);
+                    const kindLabel = cat.kind === 'daily' ? 'Denní dávka' : cat.kind === 'monthly' ? 'Měsíční renta' : 'Jednorázová PČ';
+                    let evalText = 'Beze změny';
+                    if (curV === 0 && newV > 0) evalText = '★ NOVĚ DOPLNĚNO';
+                    else if (diffV > 0) evalText = '▲ Navýšení krytí';
+                    else if (diffV < 0 && newV === 0) evalText = '✕ Zrušeno v návrhu';
+                    else if (diffV < 0) evalText = '▼ Optimalizace PČ';
+                    else if (curV === 0 && newV === 0) evalText = 'Nesjednáno';
+
+                    const r = ws2.addRow([
+                        grp.label,
+                        cat.label,
+                        kindLabel,
+                        curV,
+                        newV,
+                        { formula: `E${ ws2.rowCount + 1 }-D${ ws2.rowCount + 1 }`, result: diffV },
+                        curV > 0 ? pctV : (newV > 0 ? 'Nové' : 0),
+                        evalText,
+                        cat.hint || ''
+                    ]);
+                    /* Fix formula row reference to r.number */
+                    r.getCell(6).value = { formula: `E${r.number}-D${r.number}`, result: diffV };
+                    styleDataRow(r, 9, cmpIdx++ % 2 === 1, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'center' });
+                    r.getCell(2).font = { name: FONT, size: 9.5, bold: (curV > 0 || newV > 0), color: { argb: (curV > 0 || newV > 0) ? 'FF0F172A' : 'FF94A3B8' } };
+                    r.getCell(4).numFmt = catFmt(cat, false);
+                    r.getCell(5).numFmt = catFmt(cat, false);
+                    if (newV > 0) r.getCell(5).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                    r.getCell(6).numFmt = catFmt(cat, true);
+                    applyDeltaStyle(r.getCell(6), diffV, false);
+                    if (typeof r.getCell(7).value === 'number') r.getCell(7).numFmt = '+0.0 %;-0.0 %;0.0 %';
+                    applyDeltaStyle(r.getCell(8), diffV, false);
+                });
+            });
+
+            const totCmpM = ws2.addRow([
+                'FINANČNÍ BILANCE', 'Celkové měsíční pojistné', 'Měsíční platba',
+                curM, newM, { formula: `E${ws2.rowCount + 1}-D${ws2.rowCount + 1}`, result: diffM },
+                curM > 0 ? (diffM / curM) : 0,
+                diffM <= 0 ? 'Úspora pojistného' : 'Navýšení rozpočtu',
+                `Ročně stávající: ${fmtCZK(curM * 12)} → Návrh poradce: ${fmtCZK(newM * 12)}/rok`
+            ]);
+            totCmpM.getCell(6).value = { formula: `E${totCmpM.number}-D${totCmpM.number}`, result: diffM };
+            styleTotalRow(totCmpM, 9, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'center' });
+            totCmpM.getCell(4).numFmt = FMT_CZK;
+            totCmpM.getCell(5).numFmt = FMT_CZK;
+            totCmpM.getCell(6).numFmt = FMT_CZK_DELTA;
+            totCmpM.getCell(7).numFmt = '+0.0 %;-0.0 %;0.0 %';
+
+            ws2.addRow([]).height = 12;
+
+            /* Část B: Srovnání po jednotlivých pojištěných osobách */
+            addSectionBar(ws2, 'ČÁST B: SROVNÁNÍ KLÍČOVÝCH RIZIK PO JEDNOTLIVÝCH POJIŠTĚNÝCH OSOBÁCH', 9, 'FF0369A1');
+            const perPersonHead = ws2.addRow([
+                'Pojištěná osoba', 'Varianta', 'Měsíční pojistné', 'Smrt celkem (konst.+kles.)',
+                'Invalidita III. st. (konst.+kles.)', 'Invalidita II. / I. st.', 'Závažná onemocnění',
+                'Trvalé následky úrazu (základ)', 'Denní dávky (Úraz / Hosp. / PN)'
+            ]);
+            styleTableHeader(perPersonHead, 9, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' });
+
+            (state.clients || []).forEach((cl, cIdx) => {
+                const pCurList = (state.currentContracts || []).filter(c => c.clientId === cl.id);
+                const pNewList = (state.proposedContracts || []).filter(c => c.clientId === cl.id);
+
+                const pCurPrem = totalMonthly(pCurList);
+                const pNewPrem = totalMonthly(pNewList);
+
+                const curS = sumCategoryForClient(state.currentContracts, cl.id, 'smrt') + sumCategoryForClient(state.currentContracts, cl.id, 'smrtKles');
+                const newS = sumCategoryForClient(state.proposedContracts, cl.id, 'smrt') + sumCategoryForClient(state.proposedContracts, cl.id, 'smrtKles');
+
+                const curI3 = sumCategoryForClient(state.currentContracts, cl.id, 'invalidita') + sumCategoryForClient(state.currentContracts, cl.id, 'invKles');
+                const newI3 = sumCategoryForClient(state.proposedContracts, cl.id, 'invalidita') + sumCategoryForClient(state.proposedContracts, cl.id, 'invKles');
+
+                const curI21 = `${fmtCZKShort(sumCategoryForClient(state.currentContracts, cl.id, 'inv2'))} / ${fmtCZKShort(sumCategoryForClient(state.currentContracts, cl.id, 'inv1'))}`;
+                const newI21 = `${fmtCZKShort(sumCategoryForClient(state.proposedContracts, cl.id, 'inv2'))} / ${fmtCZKShort(sumCategoryForClient(state.proposedContracts, cl.id, 'inv1'))}`;
+
+                const curZO = sumCategoryForClient(state.currentContracts, cl.id, 'zo') + sumCategoryForClient(state.currentContracts, cl.id, 'zoKles');
+                const newZO = sumCategoryForClient(state.proposedContracts, cl.id, 'zo') + sumCategoryForClient(state.proposedContracts, cl.id, 'zoKles');
+
+                const curTN = sumCategoryForClient(state.currentContracts, cl.id, 'tnUraz') + sumCategoryForClient(state.currentContracts, cl.id, 'tnUraz10');
+                const newTN = sumCategoryForClient(state.proposedContracts, cl.id, 'tnUraz') + sumCategoryForClient(state.proposedContracts, cl.id, 'tnUraz10');
+
+                const curDaily = `DO: ${sumCategoryForClient(state.currentContracts, cl.id, 'doUraz')}/d | Hosp: ${sumCategoryForClient(state.currentContracts, cl.id, 'hospitalizace')}/d | PN: ${sumCategoryForClient(state.currentContracts, cl.id, 'pn15') + sumCategoryForClient(state.currentContracts, cl.id, 'pn28') + sumCategoryForClient(state.currentContracts, cl.id, 'pn61')}/d`;
+                const newDaily = `DO: ${sumCategoryForClient(state.proposedContracts, cl.id, 'doUraz')}/d | Hosp: ${sumCategoryForClient(state.proposedContracts, cl.id, 'hospitalizace')}/d | PN: ${sumCategoryForClient(state.proposedContracts, cl.id, 'pn15') + sumCategoryForClient(state.proposedContracts, cl.id, 'pn28') + sumCategoryForClient(state.proposedContracts, cl.id, 'pn61')}/d`;
+
+                const rCur = ws2.addRow([cl.name, 'Stávající stav', pCurPrem, curS, curI3, curI21, curZO, curTN, curDaily]);
+                styleDataRow(rCur, 9, false, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' });
+                rCur.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                [3, 4, 5, 7, 8].forEach(col => { rCur.getCell(col).numFmt = FMT_CZK; });
+
+                const rNew = ws2.addRow([cl.name, 'Návrh poradce', pNewPrem, newS, newI3, newI21, newZO, newTN, newDaily]);
+                styleDataRow(rNew, 9, true, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' });
+                rNew.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                rNew.getCell(2).font = { name: FONT, size: 9, bold: true, color: { argb: 'FF075985' } };
+                rNew.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' } };
+                [3, 4, 5, 7, 8].forEach(col => {
+                    rNew.getCell(col).numFmt = FMT_CZK;
+                    rNew.getCell(col).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                });
+
+                const rDif = ws2.addRow([
+                    cl.name, 'Rozdíl (Δ)',
+                    pNewPrem - pCurPrem, newS - curS, newI3 - curI3, '—', newZO - curZO, newTN - curTN,
+                    cIdx === 0 ? 'Hlavní živitel rodiny' : (isChildPerson(cl) ? 'Dětský tarif' : 'Dospělá osoba')
+                ]);
+                styleTotalRow(rDif, 9, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' }, 'FFF1F5F9');
+                [3, 4, 5, 7, 8].forEach(col => {
+                    rDif.getCell(col).numFmt = FMT_CZK_DELTA;
+                    applyDeltaStyle(rDif.getCell(col), num(rDif.getCell(col).value), col === 3);
+                });
+            });
+
+            /* ════════════════════════════════════════════════════════════════
+               LIST 3 & LIST 4: Detailní tabulky smluv (Stávající & Návrh)
+               ════════════════════════════════════════════════════════════════ */
+            /* Zvolíme všechny kategorie, které mají nenulovou hodnotu nebo patří mezi hlavní pilíře */
+            const activeSheetCats = D.CATEGORIES.filter(c =>
+                c.core ||
+                sumCategory(state.currentContracts, c.key) > 0 ||
+                sumCategory(state.proposedContracts, c.key) > 0
+            );
+
+            function buildContractsWorksheet(sheetTitle, tabColorArgb, contractsList, isProposed) {
+                const ws = wb.addWorksheet(sheetTitle, {
+                    properties: { tabColor: { argb: tabColorArgb } },
+                    views: [{ state: 'frozen', xSplit: 3, ySplit: 4, showGridLines: true }],
+                    pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
+                });
+
+                const cols = [
+                    { width: 20 }, // 1: Osoba
+                    { width: 20 }, // 2: Pojišťovna
+                    { width: 17 }, // 3: Č. smlouvy
+                    { width: 14 }, // 4: Od–Do
+                    { width: 15 }, // 5: Akce / Status
+                    { width: 16 }, // 6: Měs. pojistné
+                    { width: 13 }, // 7: Progrese TN
+                    { width: 13 }  // 8: PN od dne
+                ];
+                activeSheetCats.forEach(() => cols.push({ width: 15 }));
+                cols.push({ width: 38 }); // Poznámka
+                ws.columns = cols;
+                const totalCols = cols.length;
+
+                addSheetBanner(
+                    ws,
+                    isProposed ? 'NOVÁ MODELACE POJIŠTĚNÍ DLE DOPORUČENÍ PORADCE — DETAIL SMLUV' : 'AUDIT STÁVAJÍCÍHO POJIŠTĚNÍ KLIENTA — DETAIL SMLUV',
+                    isProposed ? 'Detailní rozpis ponechaných a nově sjednávaných smluv po jednotlivých rizicích' : 'Přehled současných pojistných smluv klienta, sjednaných pojistných částek a doporučených kroků',
+                    totalCols
+                );
+
+                const headVals = [
+                    'Pojištěná osoba', 'Pojišťovna', 'Číslo smlouvy', 'Od – Do',
+                    isProposed ? 'Status v návrhu' : 'Doporučená akce',
+                    'Měsíční pojistné', 'Progrese TN', 'PN od dne',
+                    ...activeSheetCats.map(c => `${c.short}\n(${c.kind === 'daily' ? 'Kč/d' : c.kind === 'monthly' ? 'Kč/m' : 'Kč'})`),
+                    'Zdůvodnění poradce / Poznámka'
+                ];
+                const hRow = ws.addRow(headVals);
+                const alignMap = { 4: 'center', 5: 'center', 6: 'right', 7: 'center', 8: 'center' };
+                activeSheetCats.forEach((_, i) => { alignMap[9 + i] = 'right'; });
+                styleTableHeader(hRow, totalCols, alignMap);
+                hRow.height = 28;
+
+                const firstDataRow = ws.rowCount + 1;
+                (contractsList || []).forEach((c, idx) => {
+                    const cond = c.conditions || {};
+                    const stKey = isProposed ? (c.proposalStatus || 'new') : (c.actionStatus || 'keep');
+                    const stList = isProposed ? D.CONTRACT_ACTIONS.proposed : D.CONTRACT_ACTIONS.current;
+                    const stMeta = (stList || []).find(a => a.key === stKey) || stList[0];
+
+                    const rowVals = [
+                        clientName(c.clientId),
+                        c.insurer || '—',
+                        c.contractNo || (isProposed ? 'Nová smlouva' : '—'),
+                        `${c.start || '—'}–${c.end || 'neurč.'}`,
+                        stMeta.short,
+                        monthlyPremium(c),
+                        `${cond.tnProgression || (isProposed ? 800 : 100)} %`,
+                        `${cond.pnFromDay || 29}. den${cond.pnRetroactive ? ' (zp.)' : ''}`,
+                        ...activeSheetCats.map(cat => num(c.items && c.items[cat.key])),
+                        c.actionReason || c.note || ''
+                    ];
+                    const r = ws.addRow(rowVals);
+                    styleDataRow(r, totalCols, idx % 2 === 1, alignMap);
+                    r.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                    applyStatusBadgeStyle(r.getCell(5), stKey);
+                    r.getCell(6).numFmt = FMT_CZK;
+                    r.getCell(6).font = { name: FONT, size: 9.5, bold: true, color: { argb: isProposed ? 'FF0369A1' : 'FF0F172A' } };
+
+                    activeSheetCats.forEach((cat, i) => {
+                        const cell = r.getCell(9 + i);
+                        const val = num(c.items && c.items[cat.key]);
+                        cell.numFmt = catFmt(cat, false);
+                        if (val === 0) {
+                            cell.font = { name: FONT, size: 9, color: { argb: 'FFCBD5E1' } };
+                        } else if (isProposed) {
+                            cell.font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                        }
+                    });
+                });
+
+                const lastDataRow = ws.rowCount;
+                const sumLabel = isProposed ? 'CELKEM NÁVRH PORADCE' : 'CELKEM STÁVAJÍCÍ PORTFOLIO';
+                const totVals = [
+                    sumLabel, `${(contractsList || []).length} smluv`, '', '', '',
+                    lastDataRow >= firstDataRow
+                        ? { formula: `SUM(F${firstDataRow}:F${lastDataRow})`, result: totalMonthly(contractsList) }
+                        : totalMonthly(contractsList),
+                    '', '',
+                    ...activeSheetCats.map((cat, i) => {
+                        const colLet = excelColName(9 + i);
+                        const res = sumCategory(contractsList, cat.key);
+                        return lastDataRow >= firstDataRow
+                            ? { formula: `SUM(${colLet}${firstDataRow}:${colLet}${lastDataRow})`, result: res }
+                            : res;
+                    }),
+                    `Roční pojistné: ${fmtCZK(totalMonthly(contractsList) * 12)}/rok`
+                ];
+                const totRow = ws.addRow(totVals);
+                styleTotalRow(totRow, totalCols, alignMap);
+                totRow.getCell(6).numFmt = FMT_CZK;
+                activeSheetCats.forEach((cat, i) => {
+                    totRow.getCell(9 + i).numFmt = catFmt(cat, false);
+                });
+
+                if (isProposed) {
+                    /* Přidáme srovnávací řádek Stávající a Rozdíl přímo pod Návrh poradce */
+                    const curCompareVals = [
+                        'CELKEM STÁVAJÍCÍ STAV (pro srovnání)', `${(state.currentContracts || []).length} smluv`, '', '', '',
+                        curM, '', '',
+                        ...activeSheetCats.map(cat => sumCategory(state.currentContracts, cat.key)),
+                        `Ročně stávající: ${fmtCZK(curM * 12)}/rok`
+                    ];
+                    const curRow = ws.addRow(curCompareVals);
+                    styleDataRow(curRow, totalCols, false, alignMap);
+                    curRow.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF475569' } };
+                    curRow.getCell(6).numFmt = FMT_CZK;
+                    activeSheetCats.forEach((cat, i) => {
+                        curRow.getCell(9 + i).numFmt = catFmt(cat, false);
+                    });
+
+                    const diffCompareVals = [
+                        'ROZDÍL (NÁVRH PORADCE − STÁVAJÍCÍ)', '', '', '', '',
+                        diffM, '', '',
+                        ...activeSheetCats.map(cat => sumCategory(state.proposedContracts, cat.key) - sumCategory(state.currentContracts, cat.key)),
+                        diffM <= 0 ? 'Úspora měsíčního pojistného' : 'Navýšení pojistné ochrany rodiny'
+                    ];
+                    const difRow = ws.addRow(diffCompareVals);
+                    styleTotalRow(difRow, totalCols, alignMap, 'FFF0FDF4');
+                    difRow.getCell(6).numFmt = FMT_CZK_DELTA;
+                    applyDeltaStyle(difRow.getCell(6), diffM, true);
+                    activeSheetCats.forEach((cat, i) => {
+                        const cell = difRow.getCell(9 + i);
+                        const dv = sumCategory(state.proposedContracts, cat.key) - sumCategory(state.currentContracts, cat.key);
+                        cell.numFmt = catFmt(cat, true);
+                        applyDeltaStyle(cell, dv, false);
+                    });
+                }
+            }
+
+            buildContractsWorksheet('3. Stávající smlouvy', 'FFD97706', state.currentContracts, false);
+            buildContractsWorksheet('4. Návrh poradce', 'FF2563EB', state.proposedContracts, true);
+
+            /* ════════════════════════════════════════════════════════════════
+               LIST 5: 5. Kalkulačka potřeb & Scénář
+               ════════════════════════════════════════════════════════════════ */
+            const ws5 = wb.addWorksheet('5. Kalkulačka potřeb & Scénář', {
+                properties: { tabColor: { argb: 'FF7C3AED' } },
+                views: [{ state: 'frozen', ySplit: 2, showGridLines: true }],
+                pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
+            });
+            ws5.columns = [
+                { width: 24 }, { width: 28 }, { width: 18 }, { width: 18 },
+                { width: 18 }, { width: 18 }, { width: 18 }, { width: 36 }
+            ];
+            addSheetBanner(ws5, 'KALKULAČKA POTŘEBNÉHO KRYTÍ (ČSSZ 2026), PROGRESE TN A MODELOVÝ SCÉNÁŘ', 'Výpočet propadu příjmu v pracovní neschopnosti a invaliditě, simulace progrese TN a daňové odpočty', 8);
+
+            addSectionBar(ws5, '1. ANALÝZA POTŘEBNÉHO KRYTÍ DLE PŘÍJMŮ A ZÁVAZKŮ (METODIKA ČSSZ 2026)', 8, 'FF6D28D9');
+            const needsHead = ws5.addRow([
+                'Posuzovaná osoba', 'Riziko / Oblast zajištění', 'Doporučené minimum',
+                'Stávající krytí', 'Návrh poradce', 'Chybí ve stávajícím', 'Stav v návrhu poradce', 'Metodika výpočtu (2026)'
+            ]);
+            styleTableHeader(needsHead, 8, { 3: 'right', 4: 'right', 5: 'right', 6: 'right', 7: 'center' });
+
+            let nRowIdx = 0;
+            (state.clients || []).filter(c => !isChildPerson(c)).forEach(person => {
+                const age = person.birthYear ? (curY - person.birthYear) : 40;
+                const netInc = D.computeNetIncome(person.incomeGross, person.isEntrepreneur);
+                const sick = D.computeExactSickLeave(person.incomeGross, person.isEntrepreneur, 60);
+                const inv3Pen = D.computeStateDisabilityPension(person.incomeGross, 3, age, person.isEntrepreneur);
+                const personLoans = (state.loans || []).filter(l => !l.linkedClientId || l.linkedClientId === person.id).reduce((s, l) => s + num(l.amount), 0) || loansTotal;
+
+                const recSmrt = Math.round((personLoans + Math.max(0, netInc * 36 - num(person.reserveCash))) / 50000) * 50000;
+                const gapInv3 = Math.max(0, netInc - inv3Pen);
+                const recInv3 = Math.round((gapInv3 * 12 * 10 + personLoans * 0.5) / 50000) * 50000;
+                const recZO   = Math.round((netInc * 24) / 50000) * 50000;
+                const recTN   = Math.round(Math.max(1000000, netInc * 30) / 50000) * 50000;
+                const recPN   = Math.ceil(Math.max(0, netInc - sick.monthlyAvg) / 30 / 50) * 50;
+
+                const curS = sumCategoryForClient(state.currentContracts, person.id, 'smrt') + sumCategoryForClient(state.currentContracts, person.id, 'smrtKles');
+                const newS = sumCategoryForClient(state.proposedContracts, person.id, 'smrt') + sumCategoryForClient(state.proposedContracts, person.id, 'smrtKles');
+                const curI = sumCategoryForClient(state.currentContracts, person.id, 'invalidita') + sumCategoryForClient(state.currentContracts, person.id, 'invKles');
+                const newI = sumCategoryForClient(state.proposedContracts, person.id, 'invalidita') + sumCategoryForClient(state.proposedContracts, person.id, 'invKles');
+                const curZ = sumCategoryForClient(state.currentContracts, person.id, 'zo') + sumCategoryForClient(state.currentContracts, person.id, 'zoKles');
+                const newZ = sumCategoryForClient(state.proposedContracts, person.id, 'zo') + sumCategoryForClient(state.proposedContracts, person.id, 'zoKles');
+                const curT = sumCategoryForClient(state.currentContracts, person.id, 'tnUraz') + sumCategoryForClient(state.currentContracts, person.id, 'tnUraz10');
+                const newT = sumCategoryForClient(state.proposedContracts, person.id, 'tnUraz') + sumCategoryForClient(state.proposedContracts, person.id, 'tnUraz10');
+                const curP = sumCategoryForClient(state.currentContracts, person.id, 'pn15') + sumCategoryForClient(state.currentContracts, person.id, 'pn28') + sumCategoryForClient(state.currentContracts, person.id, 'pn61');
+                const newP = sumCategoryForClient(state.proposedContracts, person.id, 'pn15') + sumCategoryForClient(state.proposedContracts, person.id, 'pn28') + sumCategoryForClient(state.proposedContracts, person.id, 'pn61');
+
+                const items = [
+                    { label: 'Smrt (zajištění úvěrů a rodiny)', rec: recSmrt, cur: curS, nw: newS, fmt: FMT_CZK, note: `Úvěry (${fmtCZK(personLoans)}) + 3 roky čistého příjmu − rezerva` },
+                    { label: 'Invalidita III. stupně', rec: recInv3, cur: curI, nw: newI, fmt: FMT_CZK, note: `Měsíční propad příjmu ${fmtCZK(gapInv3)}/měs × 10 let + 50 % úvěrů` },
+                    { label: 'Závažná onemocnění (ZO)', rec: recZO, cur: curZ, nw: newZ, fmt: FMT_CZK, note: `24× čistý měsíční příjem (${fmtCZK(netInc)}) na léčbu a rekonvalescenci` },
+                    { label: 'Trvalé následky úrazu (základ)', rec: recTN, cur: curT, nw: newT, fmt: FMT_CZK, note: 'Základní PČ před započtením progrese až 800–1000 %' },
+                    { label: 'Pracovní neschopnost (Kč/den)', rec: recPN, cur: curP, nw: newP, fmt: FMT_DAILY, note: `Denní propad příjmu v PN (čistý příjem − nemocenská ${fmtCZK(sick.monthlyAvg)})` }
+                ];
+
+                items.forEach(it => {
+                    const gapCur = Math.max(0, it.rec - it.cur);
+                    const okNew = it.nw >= it.rec * 0.85;
+                    const r = ws5.addRow([
+                        person.name, it.label, it.rec, it.cur, it.nw, -gapCur,
+                        okNew ? '✓ Kryto v návrhu' : 'Částečné krytí',
+                        it.note
+                    ]);
+                    styleDataRow(r, 8, nRowIdx++ % 2 === 1, { 3: 'right', 4: 'right', 5: 'right', 6: 'right', 7: 'center' });
+                    r.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                    [3, 4, 5, 6].forEach(col => { r.getCell(col).numFmt = it.fmt; });
+                    r.getCell(5).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                    if (gapCur > 0) applyDeltaStyle(r.getCell(6), -gapCur, false);
+                    applyDeltaStyle(r.getCell(7), okNew ? 1 : -1, false);
+                });
+            });
+
+            ws5.addRow([]).height = 10;
+
+            /* Sekce 5B: Simulátor progrese TN */
+            addSectionBar(ws5, '2. SIMULÁTOR PROGRESE TRVALÝCH NÁSLEDKŮ ÚRAZU (SROVNÁNÍ VÝPLATY PLNĚNÍ)', 8, 'FF0369A1');
+            const tnHead = ws5.addRow([
+                'Pojištěná osoba', 'Varianta a progrese', 'Základní PČ TN',
+                'Při 10 % poškození', 'Při 25 % poškození', 'Při 50 % poškození', 'Při 75 % poškození', 'Při 100 % poškození (max.)'
+            ]);
+            styleTableHeader(tnHead, 8, { 3: 'right', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'right' });
+
+            let tnIdx = 0;
+            (state.clients || []).forEach(person => {
+                const curBase = sumCategoryForClient(state.currentContracts, person.id, 'tnUraz') + sumCategoryForClient(state.currentContracts, person.id, 'tnUraz10');
+                const newBase = sumCategoryForClient(state.proposedContracts, person.id, 'tnUraz') + sumCategoryForClient(state.proposedContracts, person.id, 'tnUraz10');
+                const pCurC = (state.currentContracts || []).filter(c => c.clientId === person.id);
+                const pNewC = (state.proposedContracts || []).filter(c => c.clientId === person.id);
+                const curProg = pCurC.length ? Math.max(...pCurC.map(c => num(c.conditions && c.conditions.tnProgression) || 400)) : 400;
+                const newProg = pNewC.length ? Math.max(...pNewC.map(c => num(c.conditions && c.conditions.tnProgression) || 800)) : 800;
+
+                const pcts = [10, 25, 50, 75, 100];
+                const rC = ws5.addRow([
+                    person.name, `Stávající (${curProg} %)`, curBase,
+                    ...pcts.map(p => Math.round(curBase * D.computeTnProgressionMultiplier(p, curProg)))
+                ]);
+                styleDataRow(rC, 8, tnIdx++ % 2 === 1, { 3: 'right', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'right' });
+                [3, 4, 5, 6, 7, 8].forEach(col => { rC.getCell(col).numFmt = FMT_CZK; });
+
+                const rN = ws5.addRow([
+                    person.name, `Návrh poradce (${newProg} %)`, newBase,
+                    ...pcts.map(p => Math.round(newBase * D.computeTnProgressionMultiplier(p, newProg)))
+                ]);
+                styleDataRow(rN, 8, tnIdx++ % 2 === 1, { 3: 'right', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'right' });
+                rN.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                rN.getCell(2).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF075985' } };
+                [3, 4, 5, 6, 7, 8].forEach(col => {
+                    rN.getCell(col).numFmt = FMT_CZK;
+                    rN.getCell(col).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                });
+            });
+
+            /* ════════════════════════════════════════════════════════════════
+               LIST 6: 6. Závazky & Úvěry
+               ════════════════════════════════════════════════════════════════ */
+            const ws6 = wb.addWorksheet('6. Závazky & Úvěry', {
+                properties: { tabColor: { argb: 'FF0D9488' } },
+                views: [{ state: 'frozen', ySplit: 4, showGridLines: true }],
+                pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
+            });
+            ws6.columns = [
+                { width: 32 }, { width: 22 }, { width: 20 }, { width: 18 },
+                { width: 14 }, { width: 16 }, { width: 20 }, { width: 34 }
+            ];
+            addSheetBanner(ws6, 'PŘEHLED ÚVĚRŮ, HYPOTÉK A JEJICH ZAJIŠTĚNÍ ŽIVOTNÍM POJIŠTĚNÍM', 'Audit finančních závazků rodiny a kontrola dostatečnosti pojistných částek na smrt a invaliditu', 8);
+
+            const lHead = ws6.addRow([
+                'Název závazku / úvěru', 'Dlužník / Osoba', 'Nesplacená jistina',
+                'Měsíční splátka', 'Úrok (% p.a.)', 'Zbývá splácet (let)', 'Celkem k doplacení', 'Zajištění v návrhu poradce'
+            ]);
+            styleTableHeader(lHead, 8, { 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right' });
+
+            const firstLoanRow = ws6.rowCount + 1;
+            (state.loans || []).forEach((l, idx) => {
+                const totalPay = num(l.monthlyPayment) * 12 * num(l.remainingYears);
+                const r = ws6.addRow([
+                    l.name || 'Úvěr',
+                    l.linkedClientId ? clientName(l.linkedClientId) : 'Společný závazek rodiny',
+                    num(l.amount),
+                    num(l.monthlyPayment),
+                    num(l.interestRate) / 100,
+                    num(l.remainingYears),
+                    totalPay || num(l.amount),
+                    newSmrt >= loansTotal ? '✓ Plně kryto v návrhu poradce' : '⚠ Částečně kryto'
+                ]);
+                styleDataRow(r, 8, idx % 2 === 1, { 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right' });
+                r.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                r.getCell(3).numFmt = FMT_CZK;
+                r.getCell(4).numFmt = FMT_CZK;
+                r.getCell(5).numFmt = '0.00 %';
+                r.getCell(7).numFmt = FMT_CZK;
+                applyDeltaStyle(r.getCell(8), newSmrt >= loansTotal ? 1 : -1, false);
+            });
+
+            const lastLoanRow = ws6.rowCount;
+            const totMonthlyLoans = (state.loans || []).reduce((s, l) => s + num(l.monthlyPayment), 0);
+            const totLoanRow = ws6.addRow([
+                'CELKEM ZÁVAZKY RODINY', `${(state.loans || []).length} úvěrů`,
+                lastLoanRow >= firstLoanRow ? { formula: `SUM(C${firstLoanRow}:C${lastLoanRow})`, result: loansTotal } : loansTotal,
+                lastLoanRow >= firstLoanRow ? { formula: `SUM(D${firstLoanRow}:D${lastLoanRow})`, result: totMonthlyLoans } : totMonthlyLoans,
+                '', '',
+                lastLoanRow >= firstLoanRow ? { formula: `SUM(G${firstLoanRow}:G${lastLoanRow})`, result: 0 } : 0,
+                `Smrt Stávající: ${fmtCZK(curSmrt)} → Návrh: ${fmtCZK(newSmrt)}`
+            ]);
+            styleTotalRow(totLoanRow, 8, { 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right' });
+            totLoanRow.getCell(3).numFmt = FMT_CZK;
+            totLoanRow.getCell(4).numFmt = FMT_CZK;
+            totLoanRow.getCell(7).numFmt = FMT_CZK;
+
+            /* ── Zápis do binárního bufferu a stažení .xlsx ── */
+            const buffer = await wb.xlsx.writeBuffer();
+            const blob = new Blob([buffer], {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = buildExportFilename('xlsx');
+            a.click();
+            URL.revokeObjectURL(url);
+            toast('Excel (.xlsx) se 6 listy byl úspěšně vygenerován', 'success');
+        } catch (err) {
+            console.error('XLSX export error:', err);
+            toast('Chyba při exportu do Excelu: ' + err.message, 'error');
+        }
     }
     function importData(ev) {
         const file = ev.target.files[0];
@@ -1419,9 +3334,10 @@ ${input}` }
             try {
                 const data = JSON.parse(e.target.result);
                 if (!data.clients) throw new Error('Soubor neobsahuje platná data.');
-                if (!confirm('Importovat data? Aktuální stav bude přepsán.')) return;
-                state = Object.assign(defaultState(), data);
-                save(); renderAll();
+                if (!confirm('Importovat data ze souboru? Aktuální stav bude přepsán.')) return;
+                normalizeLoadedState(data);
+                save();
+                renderAll();
                 toast('Import úspěšný', 'success');
             } catch (e) { toast('Chyba importu: ' + e.message, 'error'); }
         };
@@ -1429,14 +3345,17 @@ ${input}` }
         ev.target.value = '';
     }
     function resetData() {
-        if (!confirm('Opravdu smazat VŠECHNA data? Tuto operaci nelze vrátit zpět.')) return;
-        if (!confirm('Poslední potvrzení — smazat vše?')) return;
+        if (!confirm('Opravdu smazat VŠECHNA data a začít s čistým štítem?')) return;
         state = defaultState();
-        save(); renderAll();
-        toast('Data smazána', 'info');
+        save();
+        renderAll();
+        toast('Data vymazána', 'info');
     }
     function saveAdviserBrief() {
-        state.adviserBrief = document.getElementById('adviserBrief').value;
+        const b = document.getElementById('adviserBrief');
+        const r = document.getElementById('advisorRecommendation');
+        if (b) state.adviserBrief = b.value;
+        if (r) state.advisorRecommendation = r.value;
         save();
     }
     function refreshClientSelectors() {
@@ -1444,14 +3363,12 @@ ${input}` }
         renderContractsGroup('proposed');
         renderLoans();
     }
-
-    /* ════════════ PRINT ════════════ */
     function openPrint() {
         save();
         window.open('soubory/tisk.html', '_blank');
     }
 
-    /* ════════════ MASTER RENDER ════════════ */
+    /* ════════════ MASTER RENDER & INIT ════════════ */
     function renderAll() {
         renderKPIs();
         renderClients();
@@ -1460,28 +3377,38 @@ ${input}` }
         renderLoans();
         refreshScenarioPersons();
         refreshCompareFilter();
-        document.getElementById('adviserBrief').value = state.adviserBrief || '';
+        refreshNeedsPersonSelect();
+        const b = document.getElementById('adviserBrief');
+        const r = document.getElementById('advisorRecommendation');
+        if (b) b.value = state.adviserBrief || '';
+        if (r) r.value = state.advisorRecommendation || '';
         if (window.lucide) lucide.createIcons();
     }
 
-    /* ════════════ INIT ════════════ */
     function init() {
         applyStoredTheme();
         load();
         document.querySelectorAll('.tab-btn').forEach(b => {
             b.addEventListener('click', () => switchTab(b.dataset.tab));
         });
-        document.getElementById('aiTaskType').addEventListener('change', function () {
-            document.getElementById('aiCustomQuestion').classList.toggle('hidden', this.value !== 'custom');
-        });
+        const aiType = document.getElementById('aiTaskType');
+        if (aiType) {
+            aiType.addEventListener('change', function () {
+                document.getElementById('aiCustomQuestion').classList.toggle('hidden', this.value !== 'custom');
+            });
+        }
         if (state.scenario) {
             const s = state.scenario;
             const setIf = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
             const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
             setIf('scenarioPnDays', s.pnDays);
             setIf('scenarioHospDays', s.hospDays);
+            setIf('scenarioOcrDays', s.ocrDays);
             setIf('scenarioInjury', s.injury);
+            setIf('scenarioTnPct', s.tnDamagePct);
             setChk('scenarioRetroactive', s.retroactive);
+            setChk('scenarioCriticalIllness', s.includeCriticalIllness);
+            setChk('scenarioDisability3', s.includeDisability3);
         }
         renderAll();
         renderLegal();
@@ -1492,13 +3419,16 @@ ${input}` }
     /* ════════════ EXPOSE ════════════ */
     window.app = {
         addClient, updateClient, removeClient,
-        addContract, removeContract, duplicateContract, copyFromCurrent,
-        editContract, closeContractModal, saveContractModal, applyInsurerDefaults,
+        setTableColMode,
+        addContract, removeContract, duplicateContract, copyFromCurrent, copyKeptFromCurrent, updateContractAction,
+        editContract, closeContractModal, saveContractModal, applyInsurerDefaults, copyInv3ToAll,
+        renderNeedsAnalysis, applyNeedsToProposal, updateTaxSim,
         addLoan, updateLoan, removeLoan,
-        renderScenario, renderComparison,
+        applyScenarioPreset, renderScenario, renderTnProgressionSim,
+        renderComparison,
         bulkImport, closeBulkModal, runBulkParse,
         runAiAnalysis, openAiPanel,
-        exportData, importData, resetData,
+        loadSampleData, exportData, exportXlsx, importData, resetData,
         openPrint, saveAdviserBrief, saveSettings, savePrintBranding, setTheme
     };
 

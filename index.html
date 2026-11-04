@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Srovnání pojištění – nástroj pro investičního poradce">
-    <title>Srovnání pojištění | Insurance Terminal</title>
+    <meta name="description" content="Srovnání a modelace životního pojištění – nástroj pro finančního poradce">
+    <title>Srovnání životního pojištění | Insurance Terminal v2026</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <link rel="stylesheet" href="soubory/style.css">
     <meta name="fc-module" content="insurance">
@@ -16,7 +17,7 @@
 
     <!-- ══════════════ NAVBAR ══════════════ -->
     <header class="navbar">
-        <div class="max-w-[1700px] mx-auto px-4 lg:px-6 h-14 flex items-center justify-between gap-4">
+        <div class="max-w-[1750px] mx-auto px-4 lg:px-6 h-14 flex items-center justify-between gap-4">
             <div class="flex items-center gap-2.5 shrink-0">
                 <div class="w-7 h-7 rounded bg-sky-500/10 border border-sky-500/30 flex items-center justify-center">
                     <i data-lucide="shield-check" class="w-3.5 h-3.5 text-sky-400"></i>
@@ -24,14 +25,14 @@
                 <div class="leading-tight">
                     <span class="font-semibold text-slate-100 text-sm tracking-tight">Insurance</span>
                     <span class="font-semibold text-sky-400 text-sm tracking-tight"> Terminal</span>
-                    <div class="text-[10px] text-slate-500 font-mono">Srovnání pojištění · v2026</div>
+                    <div class="text-[10px] text-slate-500 font-mono">Modelace & Srovnání ŽP · v2026</div>
                 </div>
-                <span class="hidden md:block text-slate-700 text-xs font-mono ml-2">// Klient → Stávající ↔ Návrh</span>
+                <span class="hidden xl:block text-slate-600 text-xs font-mono ml-2">// Analýza potřeb → Stávající ↔ Návrh poradce → Tisk</span>
             </div>
 
             <div id="topStats" class="hidden lg:flex items-center gap-2 text-[10px] font-mono">
                 <span class="px-2 py-1 rounded bg-slate-900/60 border border-slate-800">
-                    <span class="text-slate-500">Klienti:</span>
+                    <span class="text-slate-500">Osoby:</span>
                     <span id="navClients" class="text-slate-200 ml-1">0</span>
                 </span>
                 <span class="px-2 py-1 rounded bg-slate-900/60 border border-slate-800">
@@ -46,18 +47,30 @@
                     <span class="text-slate-500">Δ měs:</span>
                     <span id="navDiff" class="text-amber-300 ml-1">0 Kč</span>
                 </span>
+                <span class="px-2 py-1 rounded bg-slate-900/60 border border-slate-800">
+                    <span class="text-slate-500">Skóre:</span>
+                    <span id="navScore" class="text-sky-300 ml-1">0 → 0 %</span>
+                </span>
             </div>
 
-            <div class="flex items-center gap-2">
-                <button onclick="app.openPrint()" class="btn-secondary" title="Otevřít tiskovou verzi pro klienta">
+            <div class="flex items-center gap-1.5">
+                <button onclick="app.openPrint()" class="btn-primary" title="Otevřít klientskou tiskovou sestavu (A4 / PDF)">
                     <i data-lucide="printer" class="w-3.5 h-3.5"></i>
-                    <span class="hidden sm:inline">Tisk</span>
+                    <span class="hidden sm:inline">Tisk pro klienta</span>
                 </button>
-                <button onclick="app.exportData()" class="btn-secondary">
+                <button onclick="app.exportXlsx()" class="btn-secondary" style="border-color:rgba(16,185,129,0.45);color:#6ee7b7;background:rgba(16,185,129,0.1)" title="Exportovat strukturovanou a formátovanou tabulku do Microsoft Excel (.xlsx)">
+                    <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5"></i>
+                    <span class="hidden sm:inline">Excel (.xlsx)</span>
+                </button>
+                <button onclick="app.loadSampleData()" class="btn-secondary" title="Načíst vzorovou modelaci rodiny">
+                    <i data-lucide="database" class="w-3.5 h-3.5"></i>
+                    <span class="hidden md:inline">Vzor</span>
+                </button>
+                <button onclick="app.exportData()" class="btn-secondary" title="Exportovat modelaci do JSON">
                     <i data-lucide="download" class="w-3.5 h-3.5"></i>
-                    <span class="hidden sm:inline">Export</span>
+                    <span class="hidden sm:inline">JSON</span>
                 </button>
-                <label class="btn-secondary cursor-pointer">
+                <label class="btn-secondary cursor-pointer" title="Importovat modelaci z JSON">
                     <i data-lucide="upload" class="w-3.5 h-3.5"></i>
                     <span class="hidden sm:inline">Import</span>
                     <input type="file" class="hidden" accept=".json" onchange="app.importData(event)">
@@ -74,82 +87,85 @@
 
         <!-- TAB BAR -->
         <div class="border-t border-slate-800/60">
-            <div class="max-w-[1700px] mx-auto px-4 lg:px-6 flex items-center gap-1 overflow-x-auto">
+            <div class="max-w-[1750px] mx-auto px-4 lg:px-6 flex items-center gap-0.5 overflow-x-auto">
                 <button class="tab-btn tab-active" data-tab="klient">
-                    <i data-lucide="users" class="w-3.5 h-3.5"></i>Klient & Rodina
+                    <i data-lucide="users" class="w-3.5 h-3.5"></i>1. Klient & Zadání
                 </button>
                 <button class="tab-btn" data-tab="stavajici">
-                    <i data-lucide="file-text" class="w-3.5 h-3.5"></i>Stávající smlouvy
+                    <i data-lucide="file-text" class="w-3.5 h-3.5"></i>2. Stávající smlouvy
                 </button>
                 <button class="tab-btn" data-tab="navrh">
-                    <i data-lucide="file-plus-2" class="w-3.5 h-3.5"></i>Návrh smluv
+                    <i data-lucide="file-plus-2" class="w-3.5 h-3.5"></i>3. Návrh poradce
+                </button>
+                <button class="tab-btn" data-tab="modelace">
+                    <i data-lucide="calculator" class="w-3.5 h-3.5"></i>4. Kalkulačka potřeb & Daň
                 </button>
                 <button class="tab-btn" data-tab="uvery">
-                    <i data-lucide="banknote" class="w-3.5 h-3.5"></i>Závazky & Úvěry
+                    <i data-lucide="banknote" class="w-3.5 h-3.5"></i>5. Závazky & Úvěry
                 </button>
                 <button class="tab-btn" data-tab="scenar">
-                    <i data-lucide="activity" class="w-3.5 h-3.5"></i>Scénáře plnění
+                    <i data-lucide="activity" class="w-3.5 h-3.5"></i>6. Scénáře & Progrese TN
                 </button>
                 <button class="tab-btn" data-tab="srovnani">
-                    <i data-lucide="git-compare" class="w-3.5 h-3.5"></i>Srovnání
+                    <i data-lucide="git-compare" class="w-3.5 h-3.5"></i>7. Srovnání & Metriky
                 </button>
                 <button class="tab-btn" data-tab="ai">
-                    <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>AI analýza
+                    <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>AI Analýza
                 </button>
                 <button class="tab-btn" data-tab="pravo">
-                    <i data-lucide="scale" class="w-3.5 h-3.5"></i>Právní rámec
+                    <i data-lucide="scale" class="w-3.5 h-3.5"></i>Právní rámec & Pojišťovny
                 </button>
                 <button class="tab-btn" data-tab="nastaveni">
-                    <i data-lucide="settings" class="w-3.5 h-3.5"></i>Nastavení
+                    <i data-lucide="settings" class="w-3.5 h-3.5"></i>Nastavení & Tisk
                 </button>
             </div>
         </div>
     </header>
 
-    <main class="max-w-[1700px] mx-auto px-3 lg:px-4 py-3 space-y-3">
+    <main class="max-w-[1750px] mx-auto px-3 lg:px-4 py-3 space-y-3">
 
         <!-- ════════════ KPI STRIP ════════════ -->
         <section class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
             <div class="stat-card border-t-2 border-t-emerald-500">
                 <div class="stat-label flex items-center gap-1.5">
-                    <i data-lucide="file-text" class="w-3 h-3"></i>Stáv. roční náklad
+                    <i data-lucide="file-text" class="w-3 h-3"></i>Stávající pojistné
                 </div>
-                <div class="stat-value text-emerald-300" id="kpiCurrentYearly">0 Kč</div>
-                <div class="stat-sub" id="kpiCurrentMonthly">0 Kč / měs</div>
+                <div class="stat-value text-emerald-300" id="kpiCurrentMonthly">0 Kč / měs</div>
+                <div class="stat-sub" id="kpiCurrentYearly">0 Kč / rok</div>
             </div>
             <div class="stat-card border-t-2 border-t-sky-500">
                 <div class="stat-label flex items-center gap-1.5">
-                    <i data-lucide="file-plus-2" class="w-3 h-3"></i>Navrh. roční náklad
+                    <i data-lucide="file-plus-2" class="w-3 h-3"></i>Navrhované pojistné
                 </div>
-                <div class="stat-value text-sky-300" id="kpiProposedYearly">0 Kč</div>
-                <div class="stat-sub" id="kpiProposedMonthly">0 Kč / měs</div>
+                <div class="stat-value text-sky-300" id="kpiProposedMonthly">0 Kč / měs</div>
+                <div class="stat-sub" id="kpiProposedYearly">0 Kč / rok</div>
             </div>
             <div class="stat-card border-t-2 border-t-amber-500">
                 <div class="stat-label flex items-center gap-1.5">
-                    <i data-lucide="trending-up" class="w-3 h-3"></i>Rozdíl měsíčně
+                    <i data-lucide="trending-up" class="w-3 h-3"></i>Rozdíl měsíčně (Δ)
                 </div>
                 <div class="stat-value" id="kpiDiffMonthly">0 Kč</div>
                 <div class="stat-sub" id="kpiDiffPct">±0 %</div>
             </div>
             <div class="stat-card border-t-2 border-t-rose-500">
                 <div class="stat-label flex items-center gap-1.5">
-                    <i data-lucide="alert-triangle" class="w-3 h-3"></i>Podpojištěno (smrt)
+                    <i data-lucide="shield-alert" class="w-3 h-3"></i>Krytí závazků (smrt)
                 </div>
                 <div class="stat-value text-rose-300" id="kpiUnderinsured">0 Kč</div>
-                <div class="stat-sub" id="kpiUnderinsuredLabel">Krytí vs. závazky</div>
+                <div class="stat-sub" id="kpiUnderinsuredLabel">Smrt + klesající vs. úvěry</div>
             </div>
             <div class="stat-card border-t-2 border-t-violet-500">
                 <div class="stat-label flex items-center gap-1.5">
-                    <i data-lucide="layers" class="w-3 h-3"></i>Pokryté kategorie
+                    <i data-lucide="gauge" class="w-3 h-3"></i>Index kvality krytí
                 </div>
-                <div class="stat-value" id="kpiCategoriesCovered">0/13</div>
-                <div class="stat-sub" id="kpiCategoriesCoveredLabel">stáv. vs. návrh</div>
+                <div class="stat-value text-violet-300" id="kpiHealthScore">0 % → 0 %</div>
+                <div class="stat-sub" id="kpiCategoriesCoveredLabel">0 → 0 / 32 rizik</div>
             </div>
             <div class="stat-card border-t-2 border-t-fuchsia-500">
                 <div class="stat-label flex items-center gap-1.5">
-                    <i data-lucide="users" class="w-3 h-3"></i>Klientů & smluv
+                    <i data-lucide="check-square" class="w-3 h-3"></i>Akční plán smluv
                 </div>
-                <div class="stat-value" id="kpiClientCount">0</div>
+                <div class="stat-value" id="kpiClientCount">0 osob</div>
                 <div class="stat-sub" id="kpiContractCount">0 smluv celkem</div>
             </div>
         </section>
@@ -160,28 +176,53 @@
         <section id="pane-klient" class="tab-pane">
             <div class="panel p-5">
                 <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
-                    <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
-                        <i data-lucide="user" class="w-4 h-4 text-sky-400"></i>
-                        Klient a rodinní příslušníci
-                    </h2>
-                    <button onclick="app.addClient()" class="btn-primary">
-                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat osobu
-                    </button>
+                    <div>
+                        <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                            <i data-lucide="users" class="w-4 h-4 text-sky-400"></i>
+                            Pojištěné osoby v rodině & finanční profil (dle legislativy 2026)
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-0.5">
+                            Zadejte členy rodiny. U každé osoby systém automaticky spočítá čistý příjem, nemocenskou od ČSSZ, státní invalidní důchod I.–III. st. a měsíční propad příjmu.
+                        </p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="app.addClient('adult')" class="btn-primary">
+                            <i data-lucide="user-plus" class="w-3.5 h-3.5"></i>Přidat dospělého
+                        </button>
+                        <button onclick="app.addClient('child')" class="btn-secondary">
+                            <i data-lucide="baby" class="w-3.5 h-3.5"></i>Přidat dítě
+                        </button>
+                    </div>
                 </div>
-                <p class="text-xs text-slate-500 mb-4">
-                    Zadejte všechny pojištěné osoby v rodině. Každá osoba má vlastní hrubý příjem a může mít více smluv u různých pojišťoven.
-                </p>
                 <div id="clientsList" class="space-y-3"></div>
             </div>
 
-            <div class="panel p-5 mt-3">
-                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
-                    <i data-lucide="info" class="w-4 h-4 text-amber-400"></i>
-                    Zadání / poznámka poradce
-                </h2>
-                <textarea id="adviserBrief" rows="4" class="pro-input font-mono text-xs"
-                    placeholder="Pokud platíme cca 2 200 Kč dnes a nejsme kryti na úvěry, jsme ochotni platit max. o 2-3 000 měsíčně navíc. Chceme být ale krytí na nový úvěr ve výši cca 5 000 000 (hypotéka a úvěr od rodičů), zároveň na stávající úvěr, krytí vážných úrazů, pracovní neschopnosti, dlouhodobé ztráty příjmů. Pokud možno nesahat na smlouvy, kde je pán pojištěn na vážná rizika před rokem 2021 z důvodů problémů se srdcem."
-                    oninput="app.saveAdviserBrief()"></textarea>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+                <div class="panel p-5">
+                    <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-1">
+                        <i data-lucide="message-square-quote" class="w-4 h-4 text-amber-400"></i>
+                        Požadavky, cíle a zdravotní kontext klienta (Zadání)
+                    </h2>
+                    <p class="text-[11px] text-slate-500 mb-2">
+                        Zachycuje přání klienta, rozpočet, zdravotní omezení (např. prodělané operace, diagnózy) a klíčové priority (§ 79 zákona č. 170/2018 Sb.).
+                    </p>
+                    <textarea id="adviserBrief" rows="5" class="pro-input font-mono text-xs"
+                        placeholder="Popište situaci klienta: kolik dnes platí, jaké má úvěry, jaký má rozpočet na navýšení, na které starší smlouvy se nesmí sahat kvůli zdravotnímu stavu…"
+                        oninput="app.saveAdviserBrief()"></textarea>
+                </div>
+
+                <div class="panel p-5">
+                    <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-1">
+                        <i data-lucide="award" class="w-4 h-4 text-sky-400"></i>
+                        Hlavní doporučení a zdůvodnění finančního poradce (pro tisk)
+                    </h2>
+                    <p class="text-[11px] text-slate-500 mb-2">
+                        Jasné shrnutí modelace poradce, které bude výrazně zobrazeno v klientské tiskové sestavě jako oficiální stanovisko poradce.
+                    </p>
+                    <textarea id="advisorRecommendation" rows="5" class="pro-input font-mono text-xs"
+                        placeholder="Shrňte své doporučení: které smlouvy ponechat (a proč), kterou novou smlouvu sjednat, která rizika tím vyřešíme a kdy vypovědět rušené smlouvy…"
+                        oninput="app.saveAdviserBrief()"></textarea>
+                </div>
             </div>
         </section>
 
@@ -193,15 +234,25 @@
                 <div>
                     <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
                         <i data-lucide="file-text" class="w-4 h-4 text-emerald-400"></i>
-                        Stávající portfolio pojištění
+                        Stávající portfolio pojištění (audit smluv a doporučený osud)
                     </h2>
-                    <p class="text-xs text-slate-500 mt-1">Aktuálně sjednané smlouvy klienta a rodinných příslušníků</p>
+                    <p class="text-xs text-slate-500 mt-0.5">
+                        U každé stávající smlouvy určete doporučený krok poradce: <span class="text-emerald-400 font-semibold">PONECHAT</span>, <span class="text-amber-400 font-semibold">UPRAVIT</span>, <span class="text-rose-400 font-semibold">VYPOVĚDĚT</span> nebo <span class="text-violet-400 font-semibold">SLOUČIT</span>.
+                    </p>
                 </div>
                 <div class="flex items-center gap-2 flex-wrap">
+                    <div class="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded px-2 py-1">
+                        <span class="text-[10px] text-slate-400 uppercase font-bold">Sloupce:</span>
+                        <select id="colModeCurrent" class="bg-transparent text-xs text-slate-200 outline-none cursor-pointer" onchange="app.setTableColMode(this.value)">
+                            <option value="active">Aktivní rizika v portfoliu</option>
+                            <option value="core">Hlavní pilíře (17)</option>
+                            <option value="all">Všech 32 druhů pojištění</option>
+                        </select>
+                    </div>
                     <button onclick="app.addContract('current')" class="btn-primary">
-                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat smlouvu
+                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat stávající smlouvu
                     </button>
-                    <button onclick="app.bulkImport('current')" class="btn-secondary" title="Hromadný vstup z textu (LLM-friendly)">
+                    <button onclick="app.bulkImport('current')" class="btn-secondary" title="Hromadný vstup z textu nabídky/smlouvy (přes AI)">
                         <i data-lucide="file-input" class="w-3.5 h-3.5"></i>Hromadný vstup
                     </button>
                 </div>
@@ -217,16 +268,29 @@
                 <div>
                     <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
                         <i data-lucide="file-plus-2" class="w-4 h-4 text-sky-400"></i>
-                        Návrh nového portfolia
+                        Návrh nového portfolia (modelace finančního poradce)
                     </h2>
-                    <p class="text-xs text-slate-500 mt-1">Navrhované změny – nové smlouvy, úpravy nebo zachované smlouvy</p>
+                    <p class="text-xs text-slate-500 mt-0.5">
+                        Cílový stav po optimalizaci: kombinace <span class="text-emerald-400 font-semibold">zachovaných stávajících smluv</span> a <span class="text-sky-400 font-semibold">nově navržených smluv</span>.
+                    </p>
                 </div>
                 <div class="flex items-center gap-2 flex-wrap">
+                    <div class="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded px-2 py-1">
+                        <span class="text-[10px] text-slate-400 uppercase font-bold">Sloupce:</span>
+                        <select id="colModeProposed" class="bg-transparent text-xs text-slate-200 outline-none cursor-pointer" onchange="app.setTableColMode(this.value)">
+                            <option value="active">Aktivní rizika v portfoliu</option>
+                            <option value="core">Hlavní pilíře (17)</option>
+                            <option value="all">Všech 32 druhů pojištění</option>
+                        </select>
+                    </div>
+                    <button onclick="app.copyKeptFromCurrent()" class="btn-secondary" title="Zkopíruje do návrhu pouze stávající smlouvy označené jako PONECHAT">
+                        <i data-lucide="shield-check" class="w-3.5 h-3.5 text-emerald-400"></i>Přenést ponechané
+                    </button>
                     <button onclick="app.copyFromCurrent()" class="btn-secondary" title="Zkopíruje všechny stávající smlouvy do návrhu">
-                        <i data-lucide="copy" class="w-3.5 h-3.5"></i>Kopie ze stávajícího
+                        <i data-lucide="copy" class="w-3.5 h-3.5"></i>Kopie všeho
                     </button>
                     <button onclick="app.addContract('proposed')" class="btn-primary">
-                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat smlouvu
+                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat smlouvu do návrhu
                     </button>
                     <button onclick="app.bulkImport('proposed')" class="btn-secondary">
                         <i data-lucide="file-input" class="w-3.5 h-3.5"></i>Hromadný vstup
@@ -237,7 +301,86 @@
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
-             TAB 4: ÚVĚRY & ZÁVAZKY
+             TAB 4: MODELACE POTŘEB & DAŇOVÁ KALKULAČKA (NOVÉ)
+             ════════════════════════════════════════════════════════════ -->
+        <section id="pane-modelace" class="tab-pane hidden space-y-3">
+            <div class="panel p-5">
+                <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                    <div>
+                        <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                            <i data-lucide="calculator" class="w-4 h-4 text-sky-400"></i>
+                            Interaktivní kalkulačka potřebného krytí (Needs & Gap Analysis)
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-0.5">
+                            Výpočet optimálních pojistných částek dle příjmu, výdajů, závazků a státních dávek ČSSZ (2026). Porovnává Doporučené minimum × Stávající × Návrh poradce.
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <label class="text-xs text-slate-400">Modelovaná osoba:</label>
+                        <select id="needsPersonSelect" class="pro-input text-xs" style="width:auto" onchange="app.renderNeedsAnalysis()"></select>
+                        <button onclick="app.applyNeedsToProposal()" class="btn-primary" title="Vytvoří nebo upraví navrhovanou smlouvu pro tuto osobu podle vypočtených doporučených částek">
+                            <i data-lucide="wand-2" class="w-3.5 h-3.5"></i>Propis doporučeného krytí do Návrhu
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Metodické posuvníky / parametry modelace -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-3 bg-slate-950/60 border border-slate-800 rounded mb-4">
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Zajištění rodiny při smrti (roky čistého příjmu)</span>
+                        <select id="needsDeathYears" class="pro-input text-xs" onchange="app.renderNeedsAnalysis()">
+                            <option value="1">1 roční čistý příjem (+ 100 % úvěrů)</option>
+                            <option value="2" selected>2 roční čisté příjmy (+ 100 % úvěrů)</option>
+                            <option value="3">3 roční čisté příjmy (+ 100 % úvěrů)</option>
+                            <option value="5">5 ročních čistých příjmů (+ 100 % úvěrů)</option>
+                        </select>
+                    </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Doba kompenzace invalidity (roky propadu)</span>
+                        <select id="needsInvYears" class="pro-input text-xs" onchange="app.renderNeedsAnalysis()">
+                            <option value="5">5 let propadu příjmu + úvěry</option>
+                            <option value="10" selected>10 let propadu příjmu + úvěry (standard)</option>
+                            <option value="15">15 let propadu příjmu + úvěry</option>
+                            <option value="to65">Až do věku 65 let (rentiérský přepočet 4,5 % p.a.)</option>
+                        </select>
+                    </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Závažná onemocnění (měsíce čistého příjmu)</span>
+                        <select id="needsZoMonths" class="pro-input text-xs" onchange="app.renderNeedsAnalysis()">
+                            <option value="6">6 měsíčních čistých příjmů (min.)</option>
+                            <option value="12" selected>12 měsíčních čistých příjmů (standard 1 rok)</option>
+                            <option value="18">18 měsíčních čistých příjmů (1,5 roku)</option>
+                            <option value="24">24 měsíčních čistých příjmů (2 roky léčby)</option>
+                        </select>
+                    </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Cílové pokrytí čistého příjmu v PN</span>
+                        <select id="needsPnTargetPct" class="pro-input text-xs" onchange="app.renderNeedsAnalysis()">
+                            <option value="0.80">80 % čistého příjmu</option>
+                            <option value="0.90" selected>90 % čistého příjmu (doporučeno)</option>
+                            <option value="1.00">100 % čistého příjmu (plná kompenzace)</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div id="needsAnalysisOutput"></div>
+            </div>
+
+            <!-- Daňový a benefitní kalkulátor (2026) -->
+            <div class="panel p-5">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-1">
+                    <i data-lucide="percent" class="w-4 h-4 text-emerald-400"></i>
+                    Daňový odpočet (limit 48 000 Kč/rok) & Příspěvek zaměstnavatele (limit 50 000 Kč/rok) — Efektivní cena
+                </h2>
+                <p class="text-xs text-slate-500 mb-3">
+                    Spočítejte klientovi reálnou čistou cenu pojištění po započtení příspěvku zaměstnavatele a daňové úspory (např. za připojištění dlouhodobé péče LTC III.–IV. st. nebo rezervotvornou složku).
+                </p>
+                <div id="taxBenefitCalculator"></div>
+            </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             TAB 5: ÚVĚRY & ZÁVAZKY
              ════════════════════════════════════════════════════════════ -->
         <section id="pane-uvery" class="tab-pane hidden">
             <div class="panel p-5">
@@ -245,152 +388,253 @@
                     <div>
                         <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
                             <i data-lucide="banknote" class="w-4 h-4 text-rose-400"></i>
-                            Úvěry a finanční závazky
+                            Úvěry, hypotéky a finanční závazky rodiny
                         </h2>
-                        <p class="text-xs text-slate-500 mt-1">Hypotéky, spotřebitelské úvěry, půjčky od rodiny – vstup pro výpočet potřebného krytí smrti</p>
+                        <p class="text-xs text-slate-500 mt-0.5">
+                            Hypotéky, stavební spoření, spotřebitelské úvěry a rodinné půjčky – vstup pro výpočet klesající i konstantní pojistné částky smrti a invalidity.
+                        </p>
                     </div>
                     <button onclick="app.addLoan()" class="btn-primary">
-                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat úvěr
+                        <i data-lucide="plus" class="w-3.5 h-3.5"></i>Přidat úvěr / závazek
                     </button>
                 </div>
                 <div id="loansList" class="space-y-2"></div>
 
-                <div class="mt-5 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="mt-5 grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div class="kpi-card">
-                        <div class="text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Celková výše závazků</div>
+                        <div class="text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Celková nesplacená jistina závazků</div>
                         <div class="text-2xl font-bold font-mono text-rose-300" id="loansTotal">0 Kč</div>
+                        <div class="text-[10px] text-slate-500 mt-1" id="loansMonthlyTotal">Měsíční splátky celkem: 0 Kč / měs</div>
                     </div>
                     <div class="kpi-card">
-                        <div class="text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Doporučené krytí smrti (≥ závazky)</div>
+                        <div class="text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Doporučené krytí smrti (≥ jistina + 15 %)</div>
                         <div class="text-2xl font-bold font-mono text-sky-300" id="loansRecommended">0 Kč</div>
-                        <div class="text-[10px] text-slate-500 mt-1">+15 % doporučená rezerva pro pozůstalé</div>
+                        <div class="text-[10px] text-slate-500 mt-1">Kombinace klesající PČ (úvěr) + konstantní PČ (rodina)</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Stav zajištění úvěrů v Návrhu</div>
+                        <div class="text-2xl font-bold font-mono" id="loansCoverageStatus">—</div>
+                        <div class="text-[10px] text-slate-500 mt-1" id="loansCoverageSub">Součet Smrt + Smrt klesající</div>
                     </div>
                 </div>
             </div>
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
-             TAB 5: SCÉNÁŘE PLNĚNÍ
+             TAB 6: SCÉNÁŘE PLNĚNÍ & PROGRESE TN
              ════════════════════════════════════════════════════════════ -->
-        <section id="pane-scenar" class="tab-pane hidden">
+        <section id="pane-scenar" class="tab-pane hidden space-y-3">
             <div class="panel p-5">
-                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-2">
-                    <i data-lucide="activity" class="w-4 h-4 text-violet-400"></i>
-                    Modelový scénář pojistného plnění
-                </h2>
-                <p class="text-xs text-slate-500 mb-4">
-                    Simulace: pán si zlomí nohu, je 90 dní v PN, 5 dní hospitalizován a podstoupí chirurgický zákrok.
-                    Pro každou osobu vidíte, kolik by dostala ze stávajícího × návrhu.
-                </p>
-                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                    <div>
+                        <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                            <i data-lucide="activity" class="w-4 h-4 text-violet-400"></i>
+                            Interaktivní simulace pojistných událostí (Stávající × Návrh poradce)
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-0.5">
+                            Vyberte hotový modelový scénář nebo nastavte vlastní parametry události a ukažte klientovi přesné finanční plnění v Kč.
+                        </p>
+                    </div>
+                    <div class="flex flex-wrap gap-1.5">
+                        <button onclick="app.applyScenarioPreset('fracture')" class="btn-secondary text-[11px]">🦴 Komplikovaná zlomenina (90d PN)</button>
+                        <button onclick="app.applyScenarioPreset('carCrash')" class="btn-secondary text-[11px]">🚗 Vážná autonehoda (TN 50 % + 120d PN)</button>
+                        <button onclick="app.applyScenarioPreset('cancer')" class="btn-secondary text-[11px]">🎗️ Závažné onemocnění (ZO + 180d PN)</button>
+                        <button onclick="app.applyScenarioPreset('disability3')" class="btn-secondary text-[11px]">♿ Invalidita III. stupně z nemoci</button>
+                        <button onclick="app.applyScenarioPreset('childCare')" class="btn-secondary text-[11px]">🧸 Ošetřování dítěte (30d OČR + hosp.)</button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 mb-3">
                     <label class="block">
-                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Osoba</span>
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Pojištěná osoba</span>
                         <select id="scenarioPerson" class="pro-input" onchange="app.renderScenario()"></select>
                     </label>
                     <label class="block">
-                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Dní PN</span>
-                        <input type="number" id="scenarioPnDays" value="90" class="pro-input" oninput="app.renderScenario()">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Dní pracovní neschopnosti</span>
+                        <input type="number" id="scenarioPnDays" value="90" min="0" max="730" class="pro-input" oninput="app.renderScenario()">
                     </label>
                     <label class="block">
-                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Dní hospitalizace</span>
-                        <input type="number" id="scenarioHospDays" value="5" class="pro-input" oninput="app.renderScenario()">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Dní v nemocnici (Hosp.)</span>
+                        <input type="number" id="scenarioHospDays" value="5" min="0" max="365" class="pro-input" oninput="app.renderScenario()">
                     </label>
                     <label class="block">
-                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Charakter úrazu</span>
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Dní ošetřování (OČR)</span>
+                        <input type="number" id="scenarioOcrDays" value="0" min="0" max="365" class="pro-input" oninput="app.renderScenario()">
+                    </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Charakter úrazu (DOÚ)</span>
                         <select id="scenarioInjury" class="pro-input" onchange="app.renderScenario()">
-                            <option value="minor">Drobný úraz (denní dávka)</option>
-                            <option value="major">Vážný úraz (vyšší denní dávka)</option>
-                            <option value="both">Drobný + Vážný</option>
+                            <option value="none">Bez úrazu (jen nemoc)</option>
+                            <option value="minor" selected>Běžný úraz (denní odškodné)</option>
+                            <option value="major">Vážný úraz (DOÚ + vážný úraz)</option>
+                            <option value="both">Kombinace (DOÚ + vážný + zlomenina)</option>
                         </select>
                     </label>
+                    <label class="block">
+                        <span class="block text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Trvalé následky úrazu (%)</span>
+                        <input type="number" id="scenarioTnPct" value="0" min="0" max="100" step="5" class="pro-input" oninput="app.renderScenario()">
+                    </label>
                 </div>
-                <label class="inline-flex items-center gap-2 text-xs text-slate-300 mb-4">
-                    <input type="checkbox" id="scenarioRetroactive" class="pro-input" onchange="app.renderScenario()" style="width:1rem;height:1rem;">
-                    Plnění PN <strong>od 1. dne zpětně</strong> (rozšířená klauzule – platí pouze pokud má smlouva sjednanou)
-                </label>
+
+                <div class="flex flex-wrap items-center gap-4 mb-4 text-xs text-slate-300">
+                    <label class="inline-flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" id="scenarioRetroactive" class="pro-input" onchange="app.renderScenario()">
+                        <span>Započítat klauzuli <strong>PN zpětně od 1. dne</strong> (dle podmínek smlouvy / globálně)</span>
+                    </label>
+                    <label class="inline-flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" id="scenarioCriticalIllness" class="pro-input" onchange="app.renderScenario()">
+                        <span>Zahrnout diagnózu <strong>Závažného onemocnění (ZO)</strong></span>
+                    </label>
+                    <label class="inline-flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" id="scenarioDisability3" class="pro-input" onchange="app.renderScenario()">
+                        <span>Zahrnout přiznání <strong>Invalidity III. stupně</strong></span>
+                    </label>
+                </div>
+
                 <div id="scenarioResult"></div>
             </div>
 
-            <div class="panel p-5 mt-3">
+            <!-- Interaktivní simulátor progrese trvalých následků úrazu -->
+            <div class="panel p-5">
+                <div class="flex items-center justify-between mb-2 gap-3 flex-wrap">
+                    <div>
+                        <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                            <i data-lucide="trending-up" class="w-4 h-4 text-orange-400"></i>
+                            Simulátor progrese trvalých následků úrazu (TN od 0,01 % + TN od 10 %)
+                        </h2>
+                        <p class="text-xs text-slate-500">
+                            Ukazuje sílu progresivního plnění (400 % až 1000 %) u středních a těžkých úrazů oproti lineárnímu plnění.
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="text-xs text-slate-400">Rozsah poškození těla: <strong id="tnSimSliderLabel" class="text-orange-300 font-mono">35 %</strong></span>
+                        <input type="range" id="tnSimSlider" min="5" max="100" step="5" value="35" class="w-40 accent-orange-500 cursor-pointer" oninput="app.renderTnProgressionSim()">
+                    </div>
+                </div>
+                <div id="tnProgressionSimOutput"></div>
+            </div>
+
+            <div class="panel p-5">
                 <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-2">
                     <i data-lucide="wallet" class="w-4 h-4 text-amber-400"></i>
-                    Pokrytí měsíčního výpadku příjmu (zaměstnanec vs. OSVČ)
+                    Bilance měsíčního příjmu v pracovní neschopnosti a v invaliditě (ČSSZ 2026 + Pojistky)
                 </h2>
                 <p class="text-xs text-slate-500 mb-4">
-                    Modelový výpočet měsíčního příjmu v PN: zaměstnanec čerpá nemocenskou ČSSZ (cca % z hrubé mzdy dle pásem, max. 48 000) + denní dávky z pojistek; OSVČ ČSSZ čerpá jen pokud si platí (zde počítáme bez ní) + denní dávky.
+                    Přesný výpočet podle redukčních hranic ČSSZ pro rok 2026 (zaměstnanec vs. OSVČ) v kombinaci s denními dávkami a rentami z pojištění.
                 </p>
                 <div id="incomeCoverage"></div>
             </div>
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
-             TAB 6: SROVNÁNÍ
+             TAB 7: SROVNÁNÍ & METRIKY
              ════════════════════════════════════════════════════════════ -->
-        <section id="pane-srovnani" class="tab-pane hidden">
+        <section id="pane-srovnani" class="tab-pane hidden space-y-3">
+            <!-- Rozhodovací přehled smluv (Akční plán poradce) -->
+            <div class="panel p-5">
+                <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
+                    <div>
+                        <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                            <i data-lucide="clipboard-check" class="w-4 h-4 text-emerald-400"></i>
+                            Rozcestník smluv dle doporučení poradce (Co ponechat, co vypovědět a co sjednat)
+                        </h2>
+                        <p class="text-xs text-slate-500 mt-0.5">
+                            Jednoznačný přehled pro klienta, jak naložit s každou jednotlivou smlouvou. Stejný přehled je součástí klientského tisku.
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button onclick="app.exportXlsx()" class="btn-secondary" style="border-color:rgba(16,185,129,0.45);color:#6ee7b7;background:rgba(16,185,129,0.1)">
+                            <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5"></i>Export do Excelu (.xlsx)
+                        </button>
+                        <button onclick="app.openPrint()" class="btn-primary">
+                            <i data-lucide="printer" class="w-3.5 h-3.5"></i>Otevřít tisk pro klienta
+                        </button>
+                    </div>
+                </div>
+                <div id="contractActionSummary"></div>
+            </div>
+
             <div class="panel p-5">
                 <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
                     <div>
                         <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2">
                             <i data-lucide="git-compare" class="w-4 h-4 text-amber-400"></i>
-                            Detailní srovnání stávajícího × navrhovaného
+                            Položkové srovnání pojistné ochrany: Stávající stav × Návrh poradce
                         </h2>
-                        <p class="text-xs text-slate-500 mt-1">Položka po položce – přepojištění, podpojištění, duplicity, nuance podmínek</p>
+                        <p class="text-xs text-slate-500 mt-0.5">
+                            Přepínejte mezi souhrnem celé rodiny a jednotlivými osobami. Barevně odlišeno navýšení, zachování či snížení krytí.
+                        </p>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <label class="text-[10px] text-slate-400 font-mono">Osoba:</label>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <label class="text-[10px] text-slate-400 font-mono uppercase">Zobrazit:</label>
+                        <select id="compareCatMode" class="pro-input text-xs" style="width:auto" onchange="app.renderComparison()">
+                            <option value="active">Aktivní a klíčová rizika</option>
+                            <option value="all">Všech 32 druhů pojištění</option>
+                        </select>
+                        <label class="text-[10px] text-slate-400 font-mono uppercase ml-2">Osoba:</label>
                         <select id="compareFilter" class="pro-input text-xs" style="width:auto" onchange="app.renderComparison()">
-                            <option value="ALL">Souhrn – všichni</option>
+                            <option value="ALL">Souhrn – celá rodina</option>
                         </select>
                     </div>
                 </div>
                 <div id="comparisonContent"></div>
             </div>
 
-            <div class="panel p-5 mt-3">
-                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
-                    <i data-lucide="alert-octagon" class="w-4 h-4 text-rose-400"></i>
-                    Upozornění a doporučení
-                </h2>
-                <div id="recommendationsList" class="space-y-2"></div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                <div class="panel p-5">
+                    <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
+                        <i data-lucide="radar" class="w-4 h-4 text-violet-400"></i>
+                        Radarový profil 5 pilířů pojistné ochrany (0–100 %)
+                    </h2>
+                    <div class="relative h-80">
+                        <canvas id="radarChart"></canvas>
+                    </div>
+                </div>
+                <div class="panel p-5">
+                    <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
+                        <i data-lucide="bar-chart-3" class="w-4 h-4 text-sky-400"></i>
+                        Vizualizace pojistných částek dle kategorií
+                    </h2>
+                    <div class="relative h-80">
+                        <canvas id="categoryChart"></canvas>
+                    </div>
+                </div>
             </div>
 
-            <div class="panel p-5 mt-3">
+            <div class="panel p-5">
                 <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
-                    <i data-lucide="bar-chart-3" class="w-4 h-4 text-sky-400"></i>
-                    Vizualizace pokrytí dle kategorií
+                    <i data-lucide="alert-octagon" class="w-4 h-4 text-rose-400"></i>
+                    Automatický audit portfolia, upozornění a argumentace pro poradce
                 </h2>
-                <div class="relative h-80">
-                    <canvas id="categoryChart"></canvas>
-                </div>
+                <div id="recommendationsList" class="space-y-2"></div>
             </div>
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
-             TAB 7: AI ANALÝZA
+             TAB 8: AI ANALÝZA
              ════════════════════════════════════════════════════════════ -->
         <section id="pane-ai" class="tab-pane hidden">
             <div class="panel p-5 ai-panel">
                 <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-2">
                     <i data-lucide="sparkles" class="w-4 h-4"></i>
-                    AI vyhodnocení portfolia (Groq)
+                    AI vyhodnocení portfolia a příprava Záznamu z jednání (Groq)
                 </h2>
                 <p class="text-xs text-slate-400 mb-4">
-                    AI dostává kompletní portfolio (klienti, závazky, stávající a navrhované smlouvy) a posuzuje:
-                    duplicitní krytí, podpojištění, smysl změny, nuance podmínek. Klíč nastavte v záložce Nastavení (sdílený s Finance Terminalem).
+                    AI dostává kompletní portfolio (klienti, příjmy, závazky, stávající a navrhované smlouvy vč. všech 32 rizik a podmínek) a připraví odbornou analýzu nebo text přímo do Záznamu z jednání (§ 79).
                 </p>
 
                 <div class="grid grid-cols-1 lg:grid-cols-4 gap-3 mb-4">
                     <select id="aiTaskType" class="pro-input text-xs lg:col-span-1">
                         <option value="overall">Celkové vyhodnocení portfolia</option>
-                        <option value="underinsurance">Podpojištění / přepojištění</option>
-                        <option value="conditions">Analýza podmínek smluv</option>
-                        <option value="cost">Cost-benefit – stáv. vs návrh</option>
-                        <option value="legal">Soulad se zákonem o pojišťovnictví</option>
-                        <option value="custom">Vlastní dotaz</option>
+                        <option value="underinsurance">Analýza podpojištění / přepojištění</option>
+                        <option value="conditions">Analýza podmínek, výluk a progrese</option>
+                        <option value="cost">Cost-benefit argumentace pro klienta</option>
+                        <option value="legal">Návrh textu do Záznamu z jednání (§ 79)</option>
+                        <option value="custom">Vlastní dotaz poradce</option>
                     </select>
-                    <input type="text" id="aiCustomQuestion" class="pro-input text-xs lg:col-span-2 hidden" placeholder="Co konkrétně chcete od AI?">
+                    <input type="text" id="aiCustomQuestion" class="pro-input text-xs lg:col-span-2 hidden" placeholder="Co konkrétně chcete od AI posoudit nebo sepsat?">
                     <button onclick="app.runAiAnalysis()" class="btn-ai" id="aiRunBtn">
-                        <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>Spustit analýzu
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>Spustit AI analýzu
                     </button>
                 </div>
 
@@ -401,60 +645,84 @@
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
-             TAB 8: PRÁVNÍ RÁMEC
+             TAB 9: PRÁVNÍ RÁMEC & KATALOG POJIŠŤOVEN
              ════════════════════════════════════════════════════════════ -->
-        <section id="pane-pravo" class="tab-pane hidden">
+        <section id="pane-pravo" class="tab-pane hidden space-y-3">
+            <div class="panel p-5">
+                <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-2">
+                    <i data-lucide="building-2" class="w-4 h-4 text-sky-400"></i>
+                    Srovnávací přehled českých životních pojišťoven a jejich produktů (2026)
+                </h2>
+                <p class="text-xs text-slate-500 mb-3">
+                    Rychlá referenční karta pro finančního poradce: vlajkové produkty, maximální progrese trvalých následků, krytí psychických diagnóz, čekací doby a specifika underwritingu.
+                </p>
+                <div id="insurersCatalogContent"></div>
+            </div>
+
             <div class="panel p-5">
                 <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
                     <i data-lucide="scale" class="w-4 h-4 text-amber-400"></i>
-                    Právní rámec & obchodní podmínky největších českých pojišťoven
+                    Právní rámec, daňové odpočty (48 000 Kč / DIP / LTC) a metodika distribuce pojištění
                 </h2>
-                <p class="text-xs text-slate-500 mb-4">
-                    Stručný přehled legislativy (zákon č. 277/2009 Sb. + č. 170/2018 Sb.) a praxe Kooperativy, Allianz, Generali ČP, ČSOB pojišťovny, NN, Uniqa.
-                    Informativní – pro konkrétní smlouvy vždy konzultujte aktuální OP dané pojišťovny.
-                </p>
                 <div id="legalContent"></div>
             </div>
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
-             TAB 9: NASTAVENÍ
+             TAB 10: NASTAVENÍ & BRANDING TISKU
              ════════════════════════════════════════════════════════════ -->
         <section id="pane-nastaveni" class="tab-pane hidden">
             <div class="panel p-5">
                 <h2 class="text-sm font-semibold text-slate-100 flex items-center gap-2 mb-3">
                     <i data-lucide="settings" class="w-4 h-4 text-sky-400"></i>
-                    Nastavení aplikace
+                    Nastavení aplikace a identifikace finančního poradce na tisku
                 </h2>
 
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                     <div class="lg:col-span-2 panel p-4" style="background:#0b1426;border-color:#1e3a5f">
                         <h3 class="text-xs font-bold uppercase text-sky-300 mb-2 flex items-center gap-2">
                             <i data-lucide="printer" class="w-3.5 h-3.5"></i>
-                            Tisková sestava — branding poradce
+                            Klientská tisková sestava — Identifikace a branding finančního poradce
                         </h3>
-                        <p class="text-[11px] text-slate-500 mb-3">Hodnoty se použijí v hlavičce a podpisu tiskové sestavy (soubory/tisk.html).</p>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <p class="text-[11px] text-slate-400 mb-3">
+                            Tyto údaje jednoznačně identifikují autora modelace v hlavičce, v titulním bloku doporučení a v podpisové doložce tiskové sestavy (<code class="text-sky-300">soubory/tisk.html</code>).
+                        </p>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                             <div>
-                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Jméno poradce</label>
-                                <input type="text" id="setAdvisorName" class="pro-input text-xs" placeholder="např. Jan Novák, MBA"
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Jméno a tituly poradce</label>
+                                <input type="text" id="setAdvisorName" class="pro-input text-xs" placeholder="např. Ing. Jan Novák, EFA"
                                     oninput="app.savePrintBranding()">
-                                <p class="text-[10px] text-slate-500 mt-1">Zobrazí se jako „Připravil: …" v hlavičce a v podpisovém řádku. Při prázdné hodnotě se použije „investiční poradce".</p>
                             </div>
                             <div>
-                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">URL loga (přímý odkaz na obrázek)</label>
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Společnost / Makléřská síť</label>
+                                <input type="text" id="setAdvisorCompany" class="pro-input text-xs" value="MyPlans" placeholder="např. MyPlans"
+                                    oninput="app.savePrintBranding()">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">IČO / Registrace ČNB</label>
+                                <input type="text" id="setAdvisorIco" class="pro-input text-xs" placeholder="např. IČO: 12345678 · Vázaný zástupce"
+                                    oninput="app.savePrintBranding()">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Telefon poradce</label>
+                                <input type="text" id="setAdvisorPhone" class="pro-input text-xs" placeholder="např. +420 777 123 456"
+                                    oninput="app.savePrintBranding()">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">E-mail poradce</label>
+                                <input type="email" id="setAdvisorEmail" class="pro-input text-xs" placeholder="např. jan.novak@poradce.cz"
+                                    oninput="app.savePrintBranding()">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Označení / ID modelace</label>
+                                <input type="text" id="setModelId" class="pro-input font-mono text-xs" placeholder="např. MOD-2026-01"
+                                    oninput="app.savePrintBranding()">
+                            </div>
+                            <div class="md:col-span-3">
+                                <label class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">URL loga (přímý odkaz nebo lokální cesta)</label>
                                 <input type="url" id="setLogoUrl" class="pro-input font-mono text-[11px]"
                                     placeholder="https://martin-cht.github.io/pojisteni/soubory/logo.png"
                                     oninput="app.savePrintBranding()">
-                                <div class="text-[10px] text-slate-500 mt-1 leading-relaxed">
-                                    <strong class="text-emerald-300">Výchozí logo</strong> je již nastavené – pole můžete nechat prázdné a použije se automaticky.
-                                    Pokud chcete <strong>vlastní logo</strong>:<br>
-                                    1. Otevřete GitHub repozitář a v něm složku <code class="text-sky-300">soubory/</code>.<br>
-                                    2. <em>Add file → Upload files</em> a nahrajte PNG/JPG/SVG.<br>
-                                    3. Klikněte na nahraný obrázek a poté na tlačítko <strong>Raw</strong>.<br>
-                                    4. Zkopírujte adresu z prohlížeče (začíná <code class="text-sky-300">https://raw.githubusercontent.com/…</code>) a vložte sem.<br>
-                                    <strong class="text-amber-400">Velikost neřešit</strong> – v sestavě se logo automaticky zmenší (max. 180×48 px, ~13 mm na tisku).
-                                </div>
                             </div>
                         </div>
                         <div id="logoPreview" class="mt-3 hidden">
@@ -480,7 +748,7 @@
                     <div>
                         <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Model AI</h3>
                         <select id="setGroqModel" class="pro-input" onchange="app.saveSettings()">
-                            <option value="llama-3.3-70b-versatile">Llama 3.3 70B (přesnější, pomalejší)</option>
+                            <option value="llama-3.3-70b-versatile">Llama 3.3 70B (přesnější, doporučený)</option>
                             <option value="llama-3.1-8b-instant">Llama 3.1 8B (rychlejší)</option>
                             <option value="mixtral-8x7b-32768">Mixtral 8x7B (32k kontext)</option>
                             <option value="gemma2-9b-it">Gemma 2 9B</option>
@@ -488,36 +756,31 @@
                     </div>
 
                     <div>
-                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Nemocenská — sazba pásem</h3>
-                        <p class="text-[11px] text-slate-500 mb-2">Výchozí sazby ČSSZ 2024 (% redukované hrubé mzdy). V Excel byly tyto hodnoty: 64/60/56/52/48/45/43/41/36 %.</p>
-                        <div class="grid grid-cols-3 gap-1 text-[11px]">
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">1-49k: 64 %</span>
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">50-59k: 60 %</span>
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">60-69k: 56 %</span>
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">70-79k: 52 %</span>
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">80-89k: 48 %</span>
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">90-99k: 45 %</span>
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">100-109k: 43 %</span>
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">110-119k: 41 %</span>
-                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded font-mono">120k+: 36 %</span>
+                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Parametry ČSSZ & Daně 2026 (zabudováno)</h3>
+                        <div class="grid grid-cols-2 gap-1.5 text-[11px] font-mono">
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded">Prům. mzda: 48 967 Kč</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded">DVZ 1. RH: 1 633 Kč</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded">DVZ 2. RH: 2 449 Kč</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded">DVZ 3. RH: 4 897 Kč</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded">Zákl. důchod: 4 900 Kč</span>
+                            <span class="px-2 py-1 bg-slate-900 border border-slate-800 rounded">Odpočet: 48 000 Kč/r</span>
                         </div>
                     </div>
 
                     <div>
-                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Téma</h3>
+                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Téma rozhraní</h3>
                         <div class="flex gap-2">
                             <button onclick="app.setTheme('dark')" class="btn-secondary">
-                                <i data-lucide="moon" class="w-3.5 h-3.5"></i>Tmavé
+                                <i data-lucide="moon" class="w-3.5 h-3.5"></i>Tmavé (Terminal)
                             </button>
                             <button onclick="app.setTheme('light')" class="btn-secondary">
-                                <i data-lucide="sun" class="w-3.5 h-3.5"></i>Světlé
+                                <i data-lucide="sun" class="w-3.5 h-3.5"></i>Světlé (Konzultace)
                             </button>
                         </div>
                     </div>
 
                     <div class="lg:col-span-2">
-                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Datový sklad</h3>
-                        <p class="text-[11px] text-slate-500 mb-2">Veškerá data jsou uložena pouze ve vašem prohlížeči (localStorage). Pro přenos mezi zařízeními použijte Export → Import JSON.</p>
+                        <h3 class="text-xs font-bold uppercase text-slate-400 mb-2">Datový sklad (JSON stav)</h3>
                         <div class="code-block text-[11px]" id="storagePreview">{ …data… }</div>
                     </div>
                 </div>
@@ -527,11 +790,11 @@
     </main>
 
     <!-- ════════════════════════════════════════════════════════════
-         MODAL: Smlouva (přidat / editovat)
+         MODAL: Smlouva (přidat / editovat — 32 kategorií v 6 sekcích)
          ════════════════════════════════════════════════════════════ -->
     <div id="contractModal" class="modal-overlay fixed inset-0 hidden items-center justify-center p-4 z-50">
-        <div class="panel max-w-5xl w-full max-h-[90vh] overflow-y-auto p-6">
-            <div class="flex items-center justify-between mb-4">
+        <div class="panel max-w-6xl w-full max-h-[92vh] overflow-y-auto p-6">
+            <div class="flex items-center justify-between mb-4 border-b border-slate-800 pb-3">
                 <h3 class="text-base font-semibold text-slate-100 flex items-center gap-2">
                     <i data-lucide="file-edit" class="w-4 h-4 text-sky-400"></i>
                     <span id="contractModalTitle">Nová smlouva</span>
@@ -559,11 +822,10 @@
                 </button>
             </div>
             <p class="text-xs text-slate-500 mb-3">
-                Vložte text z e-mailu / PDF nabídky pojišťovny. AI (Groq) ho rozparsuje na strukturované smlouvy.
-                Vyžaduje nastavený Groq API klíč.
+                Vložte text z e-mailu / PDF nabídky pojišťovny. AI (Groq) ho rozparsuje na strukturované smlouvy včetně všech 32 pojistných kategorií.
             </p>
             <textarea id="bulkInput" rows="12" class="pro-input font-mono text-xs"
-                placeholder="Příklad:&#10;Kooperativa, smlouva 1420482462, pojistné 500 Kč/měs&#10;- smrt 200 000&#10;- invalidita 24 000&#10;- závažné onemocnění 50 000&#10;- TN úrazu 200 000&#10;- denní dávka úraz 100 Kč&#10;- hospitalizace 200 Kč&#10;- platnost 2009–2050"></textarea>
+                placeholder="Příklad:&#10;UNIQA Život & Radost, smlouva 2026001, pojistné 1 890 Kč/měs&#10;- smrt 1 000 000 Kč, smrt klesající 5 000 000 Kč&#10;- invalidita III. st. 3 000 000, II. st. 3 000 000, I. st. 1 500 000&#10;- závažné onemocnění 500 000&#10;- TN úrazu 1 000 000 (progrese 1000 %)&#10;- denní odškodné úraz 200 Kč, PN od 61. dne zpětně 500 Kč"></textarea>
             <div class="flex justify-end gap-2 mt-3">
                 <button onclick="app.closeBulkModal()" class="btn-secondary">Zrušit</button>
                 <button onclick="app.runBulkParse()" class="btn-ai" id="bulkParseBtn">

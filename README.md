@@ -1,131 +1,47 @@
-# Srovnání pojištění — Insurance Terminal
+# Srovnání a modelace životního pojištění — Insurance Terminal (v2026)
 
-Webová aplikace pro investičního poradce, která **plně nahrazuje Excel `Vzor-2024.xlsm`** a jde výrazně dál. Umožňuje rychle a přehledně:
+Komplexní webová aplikace pro finančního a pojistného poradce, která umožňuje **auditovat stávající pojistné smlouvy**, **namodelovat cílové zajištění rodiny i jednotlivce** podle metodiky EFPA ČR / ČNB (s výpočty dle legislativy 2026) a vytvořit **srozumitelný, jednoznačně identifikovatelný tiskový výstup pro klienta**.
 
-- evidovat **celou rodinu** klienta (každá osoba má vlastní příjem, OSVČ status, rok narození);
-- katalogizovat **stávající pojistné smlouvy** s detailem všech 13 pojistných kategorií;
-- sestavit **návrh nového portfolia** a srovnat ho s aktuálním stavem položku po položce;
-- evidovat **úvěry a závazky** a hlídat podpojištění / přepojištění;
-- simulovat **modelové scénáře plnění** (PN, hospitalizace, úraz, chirurgie) na stávajícím i navrženém portfoliu;
-- volat **Groq AI** pro odborné posouzení portfolia (5 přednastavených úkolů + vlastní dotaz);
-- tisknout **profesionální 5stránkovou sestavu pro klienta** s podpisovým blokem.
+---
 
-## Spuštění
+## Klíčové funkce a novinky (v2026)
 
-```text
-Otevřete v prohlížeči: index.html
-```
+1. **Kompletní katalog 32 druhů životního a úrazového pojištění v ČR (členěný do 6 skupin rizik)**:
+   - Zachovává 100% zpětnou kompatibilitu s původními 13 kategoriemi z Excelu `Vzor-2024.xlsm` a rozšiřuje je o všechna moderní připojištění českých pojišťoven:
+     - **Skupina 1 — Smrt a zajištění závazků:** Smrt konstantní (`smrt`), Smrt klesající k úvěru (`smrtKles`), Smrt úrazem (`smrtUraz`), Smrt při autonehodě (`smrtAutonehoda`), Pozůstalostní renta (`rentaPozustali`).
+     - **Skupina 2 — Invalidita a dlouhodobá péče (LTC):** Invalidita III. stupně (`invalidita`), Invalidita II. stupně (`inv2`), Invalidita I. stupně (`inv1`), Invalidita klesající k úvěru (`invKles`), Invalidní renta (`invRenta`), Dlouhodobá péče / Ztráta soběstačnosti II.–IV. st. (`dlouhodobaPece`), Zproštění od placení (`zprosteni`).
+     - **Skupina 3 — Závažná onemocnění:** Závažná onemocnění konstantní (`zavOn`), ZO klesající (`zavOnKles`), Rakovina / Onko+ pro muže a ženy (`zavOnMuzZena`), Cukrovka a kardio komplikace (`cukrovkaKompl`), Trvalé následky nemoci / Dětská soběstačnost (`trvaleNasledkyNemoc`).
+     - **Skupina 4 — Úraz a trvalé následky:** Trvalé následky úrazu od 0,01 % (`tnUraz`), TN úrazu od 10 % (`tnUraz10`), Denní odškodné úrazu DOÚ (`uraz`), Vážný úraz nad 28 dní (`urazVelky`), Zlomeniny a popáleniny (`zlomeninyPopaleniny`), Poškození horních končetin (`horniKoncetiny`).
+     - **Skupina 5 — Pracovní neschopnost, OČR a hospitalizace:** PN od 15. dne (`pn15`), PN od 29. dne (`pn28`), PN od 61. dne (`pn61`), Ošetřování dítěte / člena rodiny OČR (`osetrovani`), Hospitalizace nemoc i úraz (`hosp`), Hospitalizace úrazem (`hospUraz`).
+     - **Skupina 6 — Chirurgie, rekonvalescence a odpovědnost:** Chirurgický zákrok (`chir`), Poúrazová péče a rehabilitace (`rekonvalescence`), Občanská odpovědnost v ŽP (`odpovednostObc`).
 
-Veškerá data jsou ukládána pouze do `localStorage` Vašeho prohlížeče (klíč `insurance_compare_data`). Aplikace běží offline kromě:
-- volání Groq API (volitelné, pouze po nastavení klíče),
-- CDN pro Tailwind / Chart.js / Lucide ikony.
+2. **Jednoznačné rozhodovací štítky smluv dle doporučení poradce**:
+   - U každé **stávající smlouvy** poradce určí doporučený krok a zdůvodnění:
+     - `PONECHAT BEZE ZMĚNY` (např. kvůli zdravotní historii klienta před r. 2021),
+     - `UPRAVIT / REDUKOVAT`,
+     - `VYPOVĚDĚT / NAHRADIT` (až po přijetí nové smlouvy),
+     - `SLOUČIT DO NOVÉ SMLOUVY`.
+   - U každé **navrhované smlouvy** je zřejmé, zda jde o `NOVOU SMLOUVU`, `ZACHOVANOU STÁVAJÍCÍ`, `PO ÚPRAVĚ` nebo `ALTERNATIVU`.
 
-## Struktura souborů
+3. **Interaktivní kalkulačka potřebného krytí (Needs & Gap Analysis — legislativa 2026)**:
+   - Přesný výpočet **čisté mzdy (2026)**, **nemocenské ČSSZ** přes redukční hranice DVZ (`1 633 / 2 449 / 4 897 Kč`) a **státního invalidního důchodu I., II. a III. stupně** (základní výměra `4 900 Kč`, redukční hranice OVZ `21 546 / 195 868 Kč`).
+   - Automatický výpočet doporučených pojistných částek pro každou osobu (dospělý / OSVČ / dítě) a možnost **jedním kliknutím propsat doporučené krytí do Návrhu smluv**.
 
-```
-srovnání pojištění/
-├── index.html               ← hlavní aplikace (vstupní bod)
-├── README.md                ← tento soubor
-└── soubory/                ← složka s ostatními soubory (POZOR: malé "s" — GitHub Pages je case-sensitive)
-    ├── style.css            ← design v duchu Finance Terminalu (tmavé/světlé téma)
-    ├── insurance-data.js    ← pojistné kategorie, sazby ČSSZ, pojišťovny, právní rámec, ukázková data
-    ├── insurance-app.js     ← hlavní aplikační logika
-    └── tisk.html            ← profesionální tisková sestava (otevírá se v novém okně)
-```
+4. **Daňový a benefitní kalkulátor (2026)**:
+   - Modelace společného daňového odpočtu až **48 000 Kč/rok** (včetně daňově uznatelného pojištění dlouhodobé péče LTC III. a IV. st.) a příspěvku zaměstnavatele až **50 000 Kč/rok** → vyčíslení **skutečného čistého měsíčního nákladu klienta**.
 
-## Mapování na původní Excel `Vzor-2024.xlsm`
+5. **Simulátor progrese trvalých následků úrazu (100 % až 1000 %) & 5 předvoleb scénářů**:
+   - Interaktivní posuvník rozsahu trvalých následků úrazu (5 % až 100 %) porovnávající výplatu ze stávajících smluv a z návrhu poradce.
+   - Rychlé modelové scénáře: *Komplikovaná zlomenina*, *Vážná autonehoda s TN 50 %*, *Závažné onemocnění*, *Invalidita III. stupně*, *Ošetřování dítěte (OČR)*.
 
-| List v Excelu                  | Modul aplikace                                  |
-|--------------------------------|-------------------------------------------------|
-| `List0` (rodina Hozna)         | Klienti + Stávající smlouvy + Návrh + Úvěry     |
-| `Návrh` (abstrahovaný klient)  | Stejný datový model, jen bez napevno vázané rodiny |
-| `Součty - k tisku`             | `soubory/tisk.html` (5 stran A4)                |
-| `Tabulka1` (existing)          | `state.currentContracts`                        |
-| `Tabulka2` (proposed)          | `state.proposedContracts`                       |
-| Vzorce `SUMIF` po klientech    | Funkce `sumItemFor()` v `insurance-app.js`      |
-| Vzorce sazeb ČSSZ              | `D.SICKLEAVE_BRACKETS` v `insurance-data.js`    |
-| Scénář PN/hospitalizace        | Záložka „Scénáře plnění"                        |
+6. **Index kvality zajištění (0–100 %) & Radarový profil 5 pilířů**:
+   - Okamžité skóre kvality portfolia (Stávající vs. Návrh poradce) a paprskový graf 5 pilířů pojistné ochrany.
 
-## 13 pojistných kategorií (sloupce z Tabulky1/Tabulky2)
+7. **Katalog 13 českých životních pojišťoven (2026)**:
+   - Přehled vlajkových produktů (*Kooperativa FLEXI, Allianz ŽIVOT, Generali ČP Můj život 2, UNIQA Život & Radost, NN Orange Risk, ČSOB Náš život, MetLife OneGuard, Simplea 2.0, KB MojeJistota, ČPP NEON, Pillow Život, YOUPLUS 4U, Maxima/Direct*), jejich progrese TN, silných a slabých stránek.
 
-| Klíč        | Český název                  | Typ            |
-|-------------|------------------------------|----------------|
-| smrt        | Smrt                         | částka         |
-| smrtUraz    | Smrt úrazem                  | částka         |
-| invalidita  | Invalidita                   | částka         |
-| zavOn       | Závažné onemocnění           | částka         |
-| tnUraz      | Trvalé následky úrazu        | částka         |
-| tnUraz10    | TN úrazu od 10 %             | částka         |
-| uraz        | Drobný úraz                  | denní dávka    |
-| urazVelky   | Vážný úraz                   | denní dávka    |
-| hosp        | Hospitalizace                | denní dávka    |
-| hospUraz    | Hospitalizace úrazem         | denní dávka    |
-| pn28        | PN od 28. dne                | denní dávka    |
-| pn61        | PN od 61. dne                | denní dávka    |
-| chir        | Chirurgický zákrok           | částka         |
-
-## Výpočetní jádro
-
-- **Sazby nemocenské ČSSZ** podle pásem z Excelu (1–49 k = 64 %, …, 120 k+ = 36 %), strop 48 000 Kč/měs.
-- **Pojistné plnění při PN**: rozlišení standardního plnění (od 29. dne) a klauzule „zpětně od 1. dne".
-- **Doporučené krytí smrti**: závazky × 1,15 (15% rezerva pro pozůstalé).
-- **Doporučené krytí invalidity**: minimum 50–80 % výše úvěrů.
-- **Cílový čistý měsíční příjem v PN** ≈ 75 % hrubého (orientačně).
-- **Frekvence placení**: měsíční / čtvrtletní (×4) / roční (×12) / jednorázové (0).
-
-## AI integrace (Groq)
-
-5 přednastavených úkolů + vlastní dotaz:
-
-1. **Celkové vyhodnocení portfolia** — vhodnost návrhu vůči zadání, slabiny, doporučení.
-2. **Podpojištění / přepojištění** — mezery v krytí podle závazků a příjmu.
-3. **Analýza podmínek smluv** — klauzule PN, čekací doby, rizikové kategorie.
-4. **Cost-benefit** — cena za jednotku krytí, návratnost.
-5. **Soulad se zákonem** — § 79 zákona 170/2018, doporučení ČNB, daňové výhody, churning.
-
-AI dostává **kompletní portfolio jako strukturovaný JSON** a kontext zadání poradce. Klíč nastavte v záložce **Nastavení** (sdíleno s Finance Terminalem přes `groq_api_key` v `localStorage` / cookie).
-
-**Hromadný vstup** (záložka Stávající / Návrh → tlačítko „Hromadný vstup") — vložte text z e-mailu/PDF nabídky pojišťovny a AI ho rozparsuje na strukturované smlouvy.
-
-## Tiskový výstup
-
-Tlačítko **Tisk** v hlavičce otevře `soubory/tisk.html` v novém okně — 5stránková A4 sestava:
-
-1. **Titulní strana** — souhrn KPI, závazky, pojištěné osoby, zadání poradce.
-2. **Stávající portfolio** — přehled všech smluv po osobách.
-3. **Navrhované portfolio** — totéž pro návrh.
-4. **Srovnání** — položková tabulka + modelový scénář plnění.
-5. **Závěry a doporučení** — automaticky generovaná zjištění + podpisový blok.
-
-Sestava je responzivně optimalizovaná i pro tisk → PDF (`@page A4, 14mm`).
-
-## Právní rámec (zabudováno)
-
-Záložka **Právní rámec** obsahuje 8 bloků s aktuálním shrnutím:
-
-- Zákon č. 170/2018 Sb. — distribuce pojištění (§ 79 záznam, vhodnost, IPID, storno provize)
-- Zákon č. 277/2009 Sb. — o pojišťovnictví (Solvency II, garanční fondy)
-- Občanský zákoník §§ 2756–2872 — pojistná smlouva (odstoupení do 14/30 dnů, výpověď, krácení plnění)
-- Čekací doby a karenční doby (běžná praxe ČR 2024)
-- Klauzule „PN zpětně od 1. dne" (Simplea / Uniqa Volba / Allianz RYTMUS)
-- Daňové výhody § 6 + § 15 ZDP (odečet 48 000 Kč)
-- Doporučení ČNB pro distribuci (zákaz churning)
-- Postup při pojistné události (lhůty, šetření, promlčecí lhůta)
-
-## Návrhy na rozšíření
-
-- **Import z PDF** — drag & drop PDF nabídky → AI parsování (částečně implementováno přes „Hromadný vstup").
-- **Cloud sync přes Finance Terminal** — sdílet `insurance_compare_data` přes existující Apps Script backend.
-- **Generování návrhu smlouvy** pro konkrétní pojišťovnu na základě cílů klienta (AI).
-- **Karenční / čekací doby dynamicky podle data počátku** — kontrola, zda už platí plnění.
-- **Statistika napříč klienty** — pokud poradce eviduje více klientů (multi-klientský režim).
-- **Notifikace o blížícím se konci smluv** (pole `end`).
-- **PDF export přes server-side** (puppeteer) pro pixel-perfect výstup bez print dialogu prohlížeče.
-- **Více tisku variant**: ultra-stručná verze (1 strana), poradenský detail (10+ stran).
-- **Integrace s CRM** — odeslání portfolia do interního systému.
-
-## Poznámky k přesnosti
-
-- Sazby nemocenské, čekací doby a OP pojišťoven jsou **informativní** podle veřejných zdrojů 2024. Pro závazný výpočet vždy konzultujte aktuální OP konkrétní pojišťovny a kalkulačku ČSSZ.
-- AI odpovědi jsou **návrhy poradci**, nikoli závazná pojistná doporučení. Konečné rozhodnutí leží na poradci a klientovi.
-- Aplikace neukládá data nikam mimo Váš prohlížeč. Při změně PC použijte **Export → Import JSON**.
+8. **Klientská tisková sestava (`soubory/tisk.html`)**:
+   - Jasná identifikace poradce (Jméno, Společnost, IČO, Telefon, E-mail, ID modelace, Logo) a **Stanovisko finančního poradce** na titulní straně.
+   - **Rozcestník smluv** (barevné odlišení co ponechat, co vypovědět a co nově sjednat) a **Přehled hlavních pilířů po jednotlivých osobách**.
+   - **Chytré filtrování sloupců** (tisk pouze aktivních/sjednaných rizik pro maximální čitelnost bez desítek prázdných sloupců, s možností přepnutí na všech 32 rizik).
+   - **Bezpečný 4krokový harmonogram realizace změn** (ochrana před čekací dobou) a podpisový blok k Záznamu z jednání (§ 79 zákona č. 170/2018 Sb.).
