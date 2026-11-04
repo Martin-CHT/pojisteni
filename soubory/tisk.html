@@ -703,7 +703,7 @@
         const mode = document.getElementById('printColMode')?.value || 'active';
         if (mode === 'all') return D.CATEGORIES;
         if (mode === 'core') return D.CATEGORIES.filter(c => c.core);
-        const baseKeys = new Set(['smrt', 'smrtKles', 'invalidita', 'inv2', 'inv1', 'zo', 'tnUraz', 'doUraz', 'hospitalizace', 'pn28']);
+        const baseKeys = new Set(['smrt', 'smrtKles', 'invalidita', 'inv2', 'inv1', 'zavOn', 'tnUraz', 'uraz', 'hosp', 'pn28']);
         return D.CATEGORIES.filter(c =>
             baseKeys.has(c.key) ||
             sumItem(state.currentContracts, c.key) > 0 ||

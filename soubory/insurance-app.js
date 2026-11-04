@@ -2649,14 +2649,14 @@
             }
 
             /* ── Souhrnná čísla pro sestavu ── */
-            const curM = totalMonthly(state.currentContracts);
-            const newM = totalMonthly(state.proposedContracts);
+            const curM = totalPremiumMonthly(state.currentContracts);
+            const newM = totalPremiumMonthly(state.proposedContracts);
             const diffM = newM - curM;
-            const loansTotal = totalLoans();
-            const curHealth = computeHealthScore(state.currentContracts);
-            const newHealth = computeHealthScore(state.proposedContracts);
-            const curSmrt = sumCategory(state.currentContracts, 'smrt') + sumCategory(state.currentContracts, 'smrtKles');
-            const newSmrt = sumCategory(state.proposedContracts, 'smrt') + sumCategory(state.proposedContracts, 'smrtKles');
+            const loansTotal = sumLoans();
+            const curHealth = computePortfolioPillars(state.currentContracts, 'ALL');
+            const newHealth = computePortfolioPillars(state.proposedContracts, 'ALL');
+            const curSmrt = sumItem(state.currentContracts, 'smrt') + sumItem(state.currentContracts, 'smrtKles');
+            const newSmrt = sumItem(state.proposedContracts, 'smrt') + sumItem(state.proposedContracts, 'smrtKles');
 
             const keptCount = (state.currentContracts || []).filter(c => c.actionStatus === 'keep' || c.actionStatus === 'modify').length;
             const cancelCount = (state.currentContracts || []).filter(c => c.actionStatus === 'cancel' || c.actionStatus === 'consolidate').length;
@@ -2681,7 +2681,9 @@
             const kpiHead = ws1.addRow(['Ukazatel portfolia', 'Stávající stav', 'Návrh poradce', 'Rozdíl (Δ)', 'Pilíř pojistné ochrany (0–100 %)', 'Stávající %', 'Návrh %', 'Posun', 'Komentář / Stav']);
             styleTableHeader(kpiHead, 9, { 2: 'right', 3: 'right', 4: 'right', 6: 'right', 7: 'right', 8: 'right' });
 
-            const pillarNames = ['1. Smrt & Závazky', '2. Invalidita & Příjem', '3. Závažné nemoci', '4. Trvalé následky úrazu', '5. Krátkodobý příjem (PN)'];
+            const pillarNames = curHealth.labels || ['1. Smrt & Úvěry', '2. Invalidita I.–III.', '3. Závažné nemoci & TN', '4. PN, OČR & Nemocnice', '5. Kvalita podmínek'];
+            const curInv3Total = sumItem(state.currentContracts, 'invalidita') + sumItem(state.currentContracts, 'invKles');
+            const newInv3Total = sumItem(state.proposedContracts, 'invalidita') + sumItem(state.proposedContracts, 'invKles');
             const kpiRowsData = [
                 {
                     label: 'Měsíční pojistné celkem', cur: curM, nw: newM, diff: diffM, fmt: FMT_CZK, dFmt: FMT_CZK_DELTA, inv: true,
@@ -2697,21 +2699,21 @@
                 },
                 {
                     label: 'Krytí invalidity III. st. (konst. + kles.)',
-                    cur: sumCategory(state.currentContracts, 'invalidita') + sumCategory(state.currentContracts, 'invKles'),
-                    nw:  sumCategory(state.proposedContracts, 'invalidita') + sumCategory(state.proposedContracts, 'invKles'),
-                    diff: (sumCategory(state.proposedContracts, 'invalidita') + sumCategory(state.proposedContracts, 'invKles')) - (sumCategory(state.currentContracts, 'invalidita') + sumCategory(state.currentContracts, 'invKles')),
+                    cur: curInv3Total,
+                    nw:  newInv3Total,
+                    diff: newInv3Total - curInv3Total,
                     fmt: FMT_CZK, dFmt: FMT_CZK_DELTA, inv: false,
                     note: 'Klíčové krytí dlouhodobého výpadku příjmu'
                 },
                 {
-                    label: 'Celkové Skóre zdraví pojištění', cur: curHealth.total / 100, nw: newHealth.total / 100, diff: (newHealth.total - curHealth.total) / 100, fmt: FMT_PCT, dFmt: '+0.0 %;-0.0 %;0.0 %', inv: false,
-                    note: `Posun kvality portfolia z ${curHealth.total} % na ${newHealth.total} %`
+                    label: 'Celkové Skóre zdraví pojištění', cur: (curHealth.overall || 0) / 100, nw: (newHealth.overall || 0) / 100, diff: ((newHealth.overall || 0) - (curHealth.overall || 0)) / 100, fmt: FMT_PCT, dFmt: '+0.0 %;-0.0 %;0.0 %', inv: false,
+                    note: `Posun kvality portfolia z ${curHealth.overall || 0} % na ${newHealth.overall || 0} %`
                 }
             ];
 
             kpiRowsData.forEach((kr, idx) => {
-                const pCur = (curHealth.pillars[idx] || 0) / 100;
-                const pNew = (newHealth.pillars[idx] || 0) / 100;
+                const pCur = ((curHealth.scores && curHealth.scores[idx]) || 0) / 100;
+                const pNew = ((newHealth.scores && newHealth.scores[idx]) || 0) / 100;
                 const pDiff = pNew - pCur;
                 const r = ws1.addRow([kr.label, kr.cur, kr.nw, kr.diff, pillarNames[idx], pCur, pNew, pDiff, kr.note]);
                 styleDataRow(r, 9, idx % 2 === 1, { 2: 'right', 3: 'right', 4: 'right', 6: 'right', 7: 'right', 8: 'right' });
@@ -2770,7 +2772,7 @@
                 const age = c.birthYear ? (curY - c.birthYear) : null;
                 const netInc = child ? 0 : D.computeNetIncome(c.incomeGross, c.isEntrepreneur);
                 const sick = child ? { monthlyAvg: 0 } : D.computeExactSickLeave(c.incomeGross, c.isEntrepreneur, 60);
-                const inv3 = child ? 0 : D.computeStateDisabilityPension(c.incomeGross, 3, age || 40, c.isEntrepreneur);
+                const pens = child ? { inv3: 0 } : D.computeStateDisabilityPension(c.incomeGross, c.isEntrepreneur, c.birthYear);
                 const r = ws1.addRow([
                     c.name || '—',
                     child ? 'Dítě / Nezaopatřená osoba' : 'Dospělý (živitel)',
@@ -2779,7 +2781,7 @@
                     child ? 0 : num(c.incomeGross),
                     netInc,
                     sick.monthlyAvg,
-                    inv3,
+                    pens.inv3 || 0,
                     child ? (c.note || 'Dětský tarif') : `Výdaje: ${fmtCZK(c.expensesMonthly || 0)}/měs | Rezerva: ${fmtCZK(c.reserveCash || 0)}`
                 ]);
                 styleDataRow(r, 9, idx % 2 === 1, { 3: 'center', 4: 'center', 5: 'right', 6: 'right', 7: 'right', 8: 'right' });
@@ -2809,7 +2811,7 @@
                     c.insurer || '—',
                     c.contractNo || '—',
                     `${c.start || '—'} – ${c.end || 'neurčito'}`,
-                    monthlyPremium(c),
+                    contractMonthlyPremium(c),
                     `TN ${cond.tnProgression || 100}% | PN od ${cond.pnFromDay || 29}.d`,
                     c.actionReason || c.note || '—'
                 ]);
@@ -2829,7 +2831,7 @@
                     c.insurer || '—',
                     c.contractNo || 'Nová smlouva',
                     `${c.start || '—'} – ${c.end || 'neurčito'}`,
-                    monthlyPremium(c),
+                    contractMonthlyPremium(c),
                     `TN ${cond.tnProgression || 800}% | PN od ${cond.pnFromDay || 29}.d${cond.pnRetroactive ? ' zpětně' : ''}`,
                     c.actionReason || c.note || '—'
                 ]);
@@ -2874,8 +2876,8 @@
                 grRow.getCell(1).alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
 
                 grpCats.forEach(cat => {
-                    const curV = sumCategory(state.currentContracts, cat.key);
-                    const newV = sumCategory(state.proposedContracts, cat.key);
+                    const curV = sumItem(state.currentContracts, cat.key);
+                    const newV = sumItem(state.proposedContracts, cat.key);
                     const diffV = newV - curV;
                     const pctV = curV > 0 ? (diffV / curV) : (newV > 0 ? 1 : 0);
                     const kindLabel = cat.kind === 'daily' ? 'Denní dávka' : cat.kind === 'monthly' ? 'Měsíční renta' : 'Jednorázová PČ';
@@ -2892,12 +2894,11 @@
                         kindLabel,
                         curV,
                         newV,
-                        { formula: `E${ ws2.rowCount + 1 }-D${ ws2.rowCount + 1 }`, result: diffV },
+                        diffV,
                         curV > 0 ? pctV : (newV > 0 ? 'Nové' : 0),
                         evalText,
-                        cat.hint || ''
+                        cat.help || ''
                     ]);
-                    /* Fix formula row reference to r.number */
                     r.getCell(6).value = { formula: `E${r.number}-D${r.number}`, result: diffV };
                     styleDataRow(r, 9, cmpIdx++ % 2 === 1, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'center' });
                     r.getCell(2).font = { name: FONT, size: 9.5, bold: (curV > 0 || newV > 0), color: { argb: (curV > 0 || newV > 0) ? 'FF0F172A' : 'FF94A3B8' } };
@@ -2913,7 +2914,7 @@
 
             const totCmpM = ws2.addRow([
                 'FINANČNÍ BILANCE', 'Celkové měsíční pojistné', 'Měsíční platba',
-                curM, newM, { formula: `E${ws2.rowCount + 1}-D${ws2.rowCount + 1}`, result: diffM },
+                curM, newM, diffM,
                 curM > 0 ? (diffM / curM) : 0,
                 diffM <= 0 ? 'Úspora pojistného' : 'Navýšení rozpočtu',
                 `Ročně stávající: ${fmtCZK(curM * 12)} → Návrh poradce: ${fmtCZK(newM * 12)}/rok`
@@ -2940,26 +2941,26 @@
                 const pCurList = (state.currentContracts || []).filter(c => c.clientId === cl.id);
                 const pNewList = (state.proposedContracts || []).filter(c => c.clientId === cl.id);
 
-                const pCurPrem = totalMonthly(pCurList);
-                const pNewPrem = totalMonthly(pNewList);
+                const pCurPrem = totalPremiumMonthly(pCurList);
+                const pNewPrem = totalPremiumMonthly(pNewList);
 
-                const curS = sumCategoryForClient(state.currentContracts, cl.id, 'smrt') + sumCategoryForClient(state.currentContracts, cl.id, 'smrtKles');
-                const newS = sumCategoryForClient(state.proposedContracts, cl.id, 'smrt') + sumCategoryForClient(state.proposedContracts, cl.id, 'smrtKles');
+                const curS = sumItemFor(state.currentContracts, cl.id, 'smrt') + sumItemFor(state.currentContracts, cl.id, 'smrtKles');
+                const newS = sumItemFor(state.proposedContracts, cl.id, 'smrt') + sumItemFor(state.proposedContracts, cl.id, 'smrtKles');
 
-                const curI3 = sumCategoryForClient(state.currentContracts, cl.id, 'invalidita') + sumCategoryForClient(state.currentContracts, cl.id, 'invKles');
-                const newI3 = sumCategoryForClient(state.proposedContracts, cl.id, 'invalidita') + sumCategoryForClient(state.proposedContracts, cl.id, 'invKles');
+                const curI3 = sumItemFor(state.currentContracts, cl.id, 'invalidita') + sumItemFor(state.currentContracts, cl.id, 'invKles') + sumItemFor(state.currentContracts, cl.id, 'trvaleNasledkyNemoc');
+                const newI3 = sumItemFor(state.proposedContracts, cl.id, 'invalidita') + sumItemFor(state.proposedContracts, cl.id, 'invKles') + sumItemFor(state.proposedContracts, cl.id, 'trvaleNasledkyNemoc');
 
-                const curI21 = `${fmtCZKShort(sumCategoryForClient(state.currentContracts, cl.id, 'inv2'))} / ${fmtCZKShort(sumCategoryForClient(state.currentContracts, cl.id, 'inv1'))}`;
-                const newI21 = `${fmtCZKShort(sumCategoryForClient(state.proposedContracts, cl.id, 'inv2'))} / ${fmtCZKShort(sumCategoryForClient(state.proposedContracts, cl.id, 'inv1'))}`;
+                const curI21 = `${fmtCZKShort(sumItemFor(state.currentContracts, cl.id, 'inv2'))} / ${fmtCZKShort(sumItemFor(state.currentContracts, cl.id, 'inv1'))}`;
+                const newI21 = `${fmtCZKShort(sumItemFor(state.proposedContracts, cl.id, 'inv2'))} / ${fmtCZKShort(sumItemFor(state.proposedContracts, cl.id, 'inv1'))}`;
 
-                const curZO = sumCategoryForClient(state.currentContracts, cl.id, 'zo') + sumCategoryForClient(state.currentContracts, cl.id, 'zoKles');
-                const newZO = sumCategoryForClient(state.proposedContracts, cl.id, 'zo') + sumCategoryForClient(state.proposedContracts, cl.id, 'zoKles');
+                const curZO = sumItemFor(state.currentContracts, cl.id, 'zavOn') + sumItemFor(state.currentContracts, cl.id, 'zavOnKles') + sumItemFor(state.currentContracts, cl.id, 'zavOnMuzZena');
+                const newZO = sumItemFor(state.proposedContracts, cl.id, 'zavOn') + sumItemFor(state.proposedContracts, cl.id, 'zavOnKles') + sumItemFor(state.proposedContracts, cl.id, 'zavOnMuzZena');
 
-                const curTN = sumCategoryForClient(state.currentContracts, cl.id, 'tnUraz') + sumCategoryForClient(state.currentContracts, cl.id, 'tnUraz10');
-                const newTN = sumCategoryForClient(state.proposedContracts, cl.id, 'tnUraz') + sumCategoryForClient(state.proposedContracts, cl.id, 'tnUraz10');
+                const curTN = sumItemFor(state.currentContracts, cl.id, 'tnUraz') + sumItemFor(state.currentContracts, cl.id, 'tnUraz10');
+                const newTN = sumItemFor(state.proposedContracts, cl.id, 'tnUraz') + sumItemFor(state.proposedContracts, cl.id, 'tnUraz10');
 
-                const curDaily = `DO: ${sumCategoryForClient(state.currentContracts, cl.id, 'doUraz')}/d | Hosp: ${sumCategoryForClient(state.currentContracts, cl.id, 'hospitalizace')}/d | PN: ${sumCategoryForClient(state.currentContracts, cl.id, 'pn15') + sumCategoryForClient(state.currentContracts, cl.id, 'pn28') + sumCategoryForClient(state.currentContracts, cl.id, 'pn61')}/d`;
-                const newDaily = `DO: ${sumCategoryForClient(state.proposedContracts, cl.id, 'doUraz')}/d | Hosp: ${sumCategoryForClient(state.proposedContracts, cl.id, 'hospitalizace')}/d | PN: ${sumCategoryForClient(state.proposedContracts, cl.id, 'pn15') + sumCategoryForClient(state.proposedContracts, cl.id, 'pn28') + sumCategoryForClient(state.proposedContracts, cl.id, 'pn61')}/d`;
+                const curDaily = `DO: ${sumItemFor(state.currentContracts, cl.id, 'uraz')}/d | Hosp: ${sumItemFor(state.currentContracts, cl.id, 'hosp')}/d | PN: ${sumItemFor(state.currentContracts, cl.id, 'pn15') + sumItemFor(state.currentContracts, cl.id, 'pn28') + sumItemFor(state.currentContracts, cl.id, 'pn61')}/d`;
+                const newDaily = `DO: ${sumItemFor(state.proposedContracts, cl.id, 'uraz')}/d | Hosp: ${sumItemFor(state.proposedContracts, cl.id, 'hosp')}/d | PN: ${sumItemFor(state.proposedContracts, cl.id, 'pn15') + sumItemFor(state.proposedContracts, cl.id, 'pn28') + sumItemFor(state.proposedContracts, cl.id, 'pn61')}/d`;
 
                 const rCur = ws2.addRow([cl.name, 'Stávající stav', pCurPrem, curS, curI3, curI21, curZO, curTN, curDaily]);
                 styleDataRow(rCur, 9, false, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' });
@@ -2994,8 +2995,8 @@
             /* Zvolíme všechny kategorie, které mají nenulovou hodnotu nebo patří mezi hlavní pilíře */
             const activeSheetCats = D.CATEGORIES.filter(c =>
                 c.core ||
-                sumCategory(state.currentContracts, c.key) > 0 ||
-                sumCategory(state.proposedContracts, c.key) > 0
+                sumItem(state.currentContracts, c.key) > 0 ||
+                sumItem(state.proposedContracts, c.key) > 0
             );
 
             function buildContractsWorksheet(sheetTitle, tabColorArgb, contractsList, isProposed) {
@@ -3053,7 +3054,7 @@
                         c.contractNo || (isProposed ? 'Nová smlouva' : '—'),
                         `${c.start || '—'}–${c.end || 'neurč.'}`,
                         stMeta.short,
-                        monthlyPremium(c),
+                        contractMonthlyPremium(c),
                         `${cond.tnProgression || (isProposed ? 800 : 100)} %`,
                         `${cond.pnFromDay || 29}. den${cond.pnRetroactive ? ' (zp.)' : ''}`,
                         ...activeSheetCats.map(cat => num(c.items && c.items[cat.key])),
@@ -3083,17 +3084,17 @@
                 const totVals = [
                     sumLabel, `${(contractsList || []).length} smluv`, '', '', '',
                     lastDataRow >= firstDataRow
-                        ? { formula: `SUM(F${firstDataRow}:F${lastDataRow})`, result: totalMonthly(contractsList) }
-                        : totalMonthly(contractsList),
+                        ? { formula: `SUM(F${firstDataRow}:F${lastDataRow})`, result: totalPremiumMonthly(contractsList) }
+                        : totalPremiumMonthly(contractsList),
                     '', '',
                     ...activeSheetCats.map((cat, i) => {
                         const colLet = excelColName(9 + i);
-                        const res = sumCategory(contractsList, cat.key);
+                        const res = sumItem(contractsList, cat.key);
                         return lastDataRow >= firstDataRow
                             ? { formula: `SUM(${colLet}${firstDataRow}:${colLet}${lastDataRow})`, result: res }
                             : res;
                     }),
-                    `Roční pojistné: ${fmtCZK(totalMonthly(contractsList) * 12)}/rok`
+                    `Roční pojistné: ${fmtCZK(totalPremiumMonthly(contractsList) * 12)}/rok`
                 ];
                 const totRow = ws.addRow(totVals);
                 styleTotalRow(totRow, totalCols, alignMap);
@@ -3107,7 +3108,7 @@
                     const curCompareVals = [
                         'CELKEM STÁVAJÍCÍ STAV (pro srovnání)', `${(state.currentContracts || []).length} smluv`, '', '', '',
                         curM, '', '',
-                        ...activeSheetCats.map(cat => sumCategory(state.currentContracts, cat.key)),
+                        ...activeSheetCats.map(cat => sumItem(state.currentContracts, cat.key)),
                         `Ročně stávající: ${fmtCZK(curM * 12)}/rok`
                     ];
                     const curRow = ws.addRow(curCompareVals);
@@ -3121,7 +3122,7 @@
                     const diffCompareVals = [
                         'ROZDÍL (NÁVRH PORADCE − STÁVAJÍCÍ)', '', '', '', '',
                         diffM, '', '',
-                        ...activeSheetCats.map(cat => sumCategory(state.proposedContracts, cat.key) - sumCategory(state.currentContracts, cat.key)),
+                        ...activeSheetCats.map(cat => sumItem(state.proposedContracts, cat.key) - sumItem(state.currentContracts, cat.key)),
                         diffM <= 0 ? 'Úspora měsíčního pojistného' : 'Navýšení pojistné ochrany rodiny'
                     ];
                     const difRow = ws.addRow(diffCompareVals);
@@ -3130,7 +3131,7 @@
                     applyDeltaStyle(difRow.getCell(6), diffM, true);
                     activeSheetCats.forEach((cat, i) => {
                         const cell = difRow.getCell(9 + i);
-                        const dv = sumCategory(state.proposedContracts, cat.key) - sumCategory(state.currentContracts, cat.key);
+                        const dv = sumItem(state.proposedContracts, cat.key) - sumItem(state.currentContracts, cat.key);
                         cell.numFmt = catFmt(cat, true);
                         applyDeltaStyle(cell, dv, false);
                     });
@@ -3163,10 +3164,10 @@
 
             let nRowIdx = 0;
             (state.clients || []).filter(c => !isChildPerson(c)).forEach(person => {
-                const age = person.birthYear ? (curY - person.birthYear) : 40;
                 const netInc = D.computeNetIncome(person.incomeGross, person.isEntrepreneur);
                 const sick = D.computeExactSickLeave(person.incomeGross, person.isEntrepreneur, 60);
-                const inv3Pen = D.computeStateDisabilityPension(person.incomeGross, 3, age, person.isEntrepreneur);
+                const pens = D.computeStateDisabilityPension(person.incomeGross, person.isEntrepreneur, person.birthYear);
+                const inv3Pen = pens.inv3 || 0;
                 const personLoans = (state.loans || []).filter(l => !l.linkedClientId || l.linkedClientId === person.id).reduce((s, l) => s + num(l.amount), 0) || loansTotal;
 
                 const recSmrt = Math.round((personLoans + Math.max(0, netInc * 36 - num(person.reserveCash))) / 50000) * 50000;
@@ -3176,16 +3177,16 @@
                 const recTN   = Math.round(Math.max(1000000, netInc * 30) / 50000) * 50000;
                 const recPN   = Math.ceil(Math.max(0, netInc - sick.monthlyAvg) / 30 / 50) * 50;
 
-                const curS = sumCategoryForClient(state.currentContracts, person.id, 'smrt') + sumCategoryForClient(state.currentContracts, person.id, 'smrtKles');
-                const newS = sumCategoryForClient(state.proposedContracts, person.id, 'smrt') + sumCategoryForClient(state.proposedContracts, person.id, 'smrtKles');
-                const curI = sumCategoryForClient(state.currentContracts, person.id, 'invalidita') + sumCategoryForClient(state.currentContracts, person.id, 'invKles');
-                const newI = sumCategoryForClient(state.proposedContracts, person.id, 'invalidita') + sumCategoryForClient(state.proposedContracts, person.id, 'invKles');
-                const curZ = sumCategoryForClient(state.currentContracts, person.id, 'zo') + sumCategoryForClient(state.currentContracts, person.id, 'zoKles');
-                const newZ = sumCategoryForClient(state.proposedContracts, person.id, 'zo') + sumCategoryForClient(state.proposedContracts, person.id, 'zoKles');
-                const curT = sumCategoryForClient(state.currentContracts, person.id, 'tnUraz') + sumCategoryForClient(state.currentContracts, person.id, 'tnUraz10');
-                const newT = sumCategoryForClient(state.proposedContracts, person.id, 'tnUraz') + sumCategoryForClient(state.proposedContracts, person.id, 'tnUraz10');
-                const curP = sumCategoryForClient(state.currentContracts, person.id, 'pn15') + sumCategoryForClient(state.currentContracts, person.id, 'pn28') + sumCategoryForClient(state.currentContracts, person.id, 'pn61');
-                const newP = sumCategoryForClient(state.proposedContracts, person.id, 'pn15') + sumCategoryForClient(state.proposedContracts, person.id, 'pn28') + sumCategoryForClient(state.proposedContracts, person.id, 'pn61');
+                const curS = sumItemFor(state.currentContracts, person.id, 'smrt') + sumItemFor(state.currentContracts, person.id, 'smrtKles');
+                const newS = sumItemFor(state.proposedContracts, person.id, 'smrt') + sumItemFor(state.proposedContracts, person.id, 'smrtKles');
+                const curI = sumItemFor(state.currentContracts, person.id, 'invalidita') + sumItemFor(state.currentContracts, person.id, 'invKles');
+                const newI = sumItemFor(state.proposedContracts, person.id, 'invalidita') + sumItemFor(state.proposedContracts, person.id, 'invKles');
+                const curZ = sumItemFor(state.currentContracts, person.id, 'zavOn') + sumItemFor(state.currentContracts, person.id, 'zavOnKles') + sumItemFor(state.currentContracts, person.id, 'zavOnMuzZena');
+                const newZ = sumItemFor(state.proposedContracts, person.id, 'zavOn') + sumItemFor(state.proposedContracts, person.id, 'zavOnKles') + sumItemFor(state.proposedContracts, person.id, 'zavOnMuzZena');
+                const curT = sumItemFor(state.currentContracts, person.id, 'tnUraz') + sumItemFor(state.currentContracts, person.id, 'tnUraz10');
+                const newT = sumItemFor(state.proposedContracts, person.id, 'tnUraz') + sumItemFor(state.proposedContracts, person.id, 'tnUraz10');
+                const curP = sumItemFor(state.currentContracts, person.id, 'pn15') + sumItemFor(state.currentContracts, person.id, 'pn28') + sumItemFor(state.currentContracts, person.id, 'pn61');
+                const newP = sumItemFor(state.proposedContracts, person.id, 'pn15') + sumItemFor(state.proposedContracts, person.id, 'pn28') + sumItemFor(state.proposedContracts, person.id, 'pn61');
 
                 const items = [
                     { label: 'Smrt (zajištění úvěrů a rodiny)', rec: recSmrt, cur: curS, nw: newS, fmt: FMT_CZK, note: `Úvěry (${fmtCZK(personLoans)}) + 3 roky čistého příjmu − rezerva` },
@@ -3224,8 +3225,8 @@
 
             let tnIdx = 0;
             (state.clients || []).forEach(person => {
-                const curBase = sumCategoryForClient(state.currentContracts, person.id, 'tnUraz') + sumCategoryForClient(state.currentContracts, person.id, 'tnUraz10');
-                const newBase = sumCategoryForClient(state.proposedContracts, person.id, 'tnUraz') + sumCategoryForClient(state.proposedContracts, person.id, 'tnUraz10');
+                const curBase = sumItemFor(state.currentContracts, person.id, 'tnUraz') + sumItemFor(state.currentContracts, person.id, 'tnUraz10');
+                const newBase = sumItemFor(state.proposedContracts, person.id, 'tnUraz') + sumItemFor(state.proposedContracts, person.id, 'tnUraz10');
                 const pCurC = (state.currentContracts || []).filter(c => c.clientId === person.id);
                 const pNewC = (state.proposedContracts || []).filter(c => c.clientId === person.id);
                 const curProg = pCurC.length ? Math.max(...pCurC.map(c => num(c.conditions && c.conditions.tnProgression) || 400)) : 400;
