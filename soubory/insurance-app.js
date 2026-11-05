@@ -19,9 +19,12 @@
     function uid()        { return 'x' + Math.random().toString(36).slice(2, 10); }
     function clone(o)     { return JSON.parse(JSON.stringify(o)); }
     function num(v)       { v = parseFloat(v); return isNaN(v) ? 0 : v; }
-    function fmtCZK(n) {
+    function fmt(n) {
         n = Math.round(num(n));
-        return n.toLocaleString('cs-CZ', { maximumFractionDigits: 0 }) + ' Kč';
+        return n.toLocaleString('cs-CZ', { maximumFractionDigits: 0 });
+    }
+    function fmtCZK(n) {
+        return fmt(n) + ' Kč';
     }
     function fmtCZKShort(n) {
         n = num(n);
@@ -97,6 +100,7 @@
         proposalStatus: which === 'proposed' ? 'new' : undefined,
         actionReason: '',
         items: Object.fromEntries(D.CATEGORIES.map(c => [c.key, 0])),
+        itemPremiums: Object.fromEntries(D.CATEGORIES.map(c => [c.key, 0])),
         conditions: {
             contractType: 'risk',
             pnWaitingDays: 29,
@@ -167,17 +171,31 @@
             if (c.reserveCash == null) c.reserveCash = 0;
             if (c.occupationRisk == null) c.occupationRisk = c.role === 'child' ? 'Dítě' : '1';
         });
-        /* Automatické doplnění všech 32 kategorií a defaultních štítků pro existující smlouvy */
+        /* Automatické doplnění všech kategorií, pojistného za položku a defaultních štítků pro existující smlouvy */
         const keptContractNos = new Set((state.proposedContracts || []).map(c => (c.contractNo || '').trim()).filter(Boolean));
-        (state.currentContracts || []).forEach(c => {
+        const ensureContractItemPrems = (c) => {
             c.items = c.items || {};
-            D.CATEGORIES.forEach(cat => { if (c.items[cat.key] == null) c.items[cat.key] = 0; });
+            c.itemPremiums = c.itemPremiums || {};
+            D.CATEGORIES.forEach(cat => {
+                if (c.items[cat.key] == null) c.items[cat.key] = 0;
+                if (c.itemPremiums[cat.key] == null) c.itemPremiums[cat.key] = 0;
+            });
+            const sumIP = D.CATEGORIES.reduce((s, cat) => s + num(c.itemPremiums[cat.key]), 0);
+            const hasActiveItems = D.CATEGORIES.some(cat => num(c.items[cat.key]) > 0);
+            if (sumIP === 0 && num(c.premium) > 0 && hasActiveItems && D.estimateItemPremiums) {
+                c.itemPremiums = D.estimateItemPremiums(c.items, contractMonthlyPremium(c));
+            } else if (num(c.premium) === 0 && sumIP > 0) {
+                c.premium = Math.round(sumIP);
+            }
+        };
+        (state.currentContracts || []).forEach(c => {
             c.conditions = Object.assign({
                 contractType: 'risk', pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: false,
                 hospWaitingDays: 0, criticalIllnessWaitingMonths: 2, tnProgression: 400,
                 invPsychIncluded: true, backPainIncluded: false, paymentFrequency: 'monthly',
                 employerContribution: 0, taxDeductibleAnnual: 0
             }, c.conditions || {});
+            ensureContractItemPrems(c);
             if (!c.actionStatus) {
                 c.actionStatus = (c.contractNo && keptContractNos.has(c.contractNo.trim())) ? 'keep' : 'cancel';
             }
@@ -185,14 +203,13 @@
         });
         const curContractNos = new Set((state.currentContracts || []).map(c => (c.contractNo || '').trim()).filter(Boolean));
         (state.proposedContracts || []).forEach(c => {
-            c.items = c.items || {};
-            D.CATEGORIES.forEach(cat => { if (c.items[cat.key] == null) c.items[cat.key] = 0; });
             c.conditions = Object.assign({
                 contractType: 'risk', pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
                 hospWaitingDays: 0, criticalIllnessWaitingMonths: 2, tnProgression: 800,
                 invPsychIncluded: true, backPainIncluded: true, paymentFrequency: 'monthly',
                 employerContribution: 0, taxDeductibleAnnual: 0
             }, c.conditions || {});
+            ensureContractItemPrems(c);
             if (!c.proposalStatus) {
                 const isExisting = (c.contractNo && curContractNos.has(c.contractNo.trim())) || /zachov/i.test(c.note || '');
                 c.proposalStatus = isExisting ? 'kept' : 'new';
@@ -251,6 +268,12 @@
         if (f === 'singlepay') return 0;
         return p;
     }
+    function contractItemPremium(c, key) {
+        return num(c && c.itemPremiums && c.itemPremiums[key]);
+    }
+    function sumContractItemPremiums(c) {
+        return D.CATEGORIES.reduce((s, cat) => s + contractItemPremium(c, cat.key), 0);
+    }
     function totalPremiumMonthly(list) {
         return (list || []).reduce((s, c) => s + contractMonthlyPremium(c), 0);
     }
@@ -262,6 +285,17 @@
     }
     function sumItemFor(list, clientId, key) {
         return (list || []).filter(c => c.clientId === clientId).reduce((s, c) => s + num(c.items && c.items[key]), 0);
+    }
+    function sumItemPremium(list, key) {
+        return (list || []).reduce((s, c) => s + contractItemPremium(c, key), 0);
+    }
+    function sumItemPremiumFor(list, clientId, key) {
+        return (list || []).filter(c => c.clientId === clientId).reduce((s, c) => s + contractItemPremium(c, key), 0);
+    }
+    function sumGroupPremium(list, groupKey, clientId) {
+        const filtered = (clientId && clientId !== 'ALL') ? (list || []).filter(c => c.clientId === clientId) : (list || []);
+        const grpCats = D.CATEGORIES.filter(cat => cat.group === groupKey);
+        return filtered.reduce((s, c) => s + grpCats.reduce((gs, cat) => gs + contractItemPremium(c, cat.key), 0), 0);
     }
     function sumLoans() {
         return (state.loans || []).reduce((s, l) => s + num(l.amount), 0);
@@ -284,9 +318,11 @@
     }
     function effectiveInv2Cover(list, clientId) {
         const f = clientId ? list.filter(c => c.clientId === clientId) : list;
-        /* Pokud není samostatně zadána inv2, ale je zadána souhrnná invalidita/invKles, zohledníme */
-        const direct = sumItem(f, 'inv2') + sumItem(f, 'invKles');
-        return direct > 0 ? direct : sumItem(f, 'invalidita') * 0.5;
+        /* Pokud je samostatně zadána inv2 nebo inv2Kles (k úvěru) */
+        const direct = sumItem(f, 'inv2') + sumItem(f, 'inv2Kles');
+        if (direct > 0) return direct;
+        const loanInv = sumItem(f, 'invKles');
+        return loanInv > 0 ? loanInv : sumItem(f, 'invalidita') * 0.5;
     }
     function effectiveInv1Cover(list, clientId) {
         const f = clientId ? list.filter(c => c.clientId === clientId) : list;
@@ -757,7 +793,24 @@
         const blocks = state.clients.map(person => {
             const items = groups[person.id] || [];
             const sums = visCats.map(cat => sumItemFor(list, person.id, cat.key));
+            const sumPrems = visCats.map(cat => sumItemPremiumFor(list, person.id, cat.key));
             const personPremium = items.reduce((s, c) => s + contractMonthlyPremium(c), 0);
+            const sumAllItemPrems = D.CATEGORIES.reduce((s, cat) => s + sumItemPremiumFor(list, person.id, cat.key), 0);
+
+            const groupBreakdownHtml = items.length ? `
+                <div class="px-3 py-2 bg-slate-950/70 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[10.5px]">
+                    <span class="text-slate-400 font-semibold uppercase tracking-wide">Rozpad pojistného dle skupin rizik (${escapeHtml(person.name)}):</span>
+                    <div class="flex flex-wrap items-center gap-2">
+                        ${D.CATEGORY_GROUPS.map(grp => {
+                            const gp = Math.round(sumGroupPremium(list, grp.key, person.id));
+                            if (gp <= 0) return '';
+                            const pct = personPremium > 0 ? Math.round((gp / personPremium) * 100) : 0;
+                            return `<span class="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 font-mono text-slate-300">
+                                <span class="text-${grp.color}-300 font-semibold">${escapeHtml(grp.short)}:</span> ${gp} Kč/m <span class="text-slate-500">(${pct}%)</span>
+                            </span>`;
+                        }).filter(Boolean).join('') || '<span class="text-slate-500 italic">Pojistné za položky zatím nerozpočteno</span>'}
+                    </div>
+                </div>` : '';
 
             return `
                 <div class="contract-block">
@@ -778,7 +831,7 @@
                                 <tr>
                                     <th style="min-width:190px">Pojišťovna & Smlouva</th>
                                     <th style="min-width:120px">Doporučení poradce</th>
-                                    ${visCats.map(c => `<th title="${escapeHtml(c.label)} — ${escapeHtml(c.help)}" class="num">${escapeHtml(c.mini)}</th>`).join('')}
+                                    ${visCats.map(c => `<th title="${escapeHtml(c.label)} — horní řádek: pojistná částka, spodní řádek: pojistné za položku (Kč/měs)" class="num">${escapeHtml(c.mini)}</th>`).join('')}
                                     <th class="num">Platba/měs</th>
                                     <th>Akce</th>
                                 </tr>
@@ -789,14 +842,21 @@
                             </tbody>
                             ${items.length ? `<tfoot>
                                 <tr>
-                                    <td colspan="2">Σ ${escapeHtml(person.name)}</td>
+                                    <td colspan="2">Σ ${escapeHtml(person.name)} <span class="text-[10px] text-slate-400 font-normal">(pojistná částka)</span></td>
                                     ${sums.map((v, i) => `<td class="${v ? '' : 'dash'}">${fmtCatShort(v, visCats[i])}</td>`).join('')}
                                     <td>${fmtCZK(personPremium)}</td>
+                                    <td></td>
+                                </tr>
+                                <tr style="background:#0b1324;border-top:1px dashed #334155">
+                                    <td colspan="2" class="text-[10px] text-amber-300/90 font-normal">↳ Σ pojistné za položku (Kč/měs)</td>
+                                    ${sumPrems.map(vp => `<td class="${vp ? 'text-amber-300/90 text-[10px] font-medium' : 'dash'}">${vp ? Math.round(vp) + ' Kč' : '·'}</td>`).join('')}
+                                    <td class="text-amber-300 text-[10.5px]">${fmtCZK(sumAllItemPrems || personPremium)}</td>
                                     <td></td>
                                 </tr>
                             </tfoot>` : ''}
                         </table>
                     </div>
+                    ${groupBreakdownHtml}
                 </div>`;
         });
 
@@ -833,8 +893,14 @@
             </td>
             ${visCats.map(cat => {
                 const v = num(c.items && c.items[cat.key]);
-                if (!v) return `<td class="dash">·</td>`;
-                return `<td class="num" title="${escapeHtml(cat.label)}: ${fmtCatValue(v, cat)}">${fmtCatShort(v, cat)}</td>`;
+                const vp = contractItemPremium(c, cat.key);
+                if (!v && !vp) return `<td class="dash">·</td>`;
+                return `<td class="num" title="${escapeHtml(cat.label)}: pojistná částka ${fmtCatValue(v, cat)} | pojistné za položku ${fmtCZK(vp)}/měs">
+                    <div class="leading-tight">
+                        <div>${v ? fmtCatShort(v, cat) : '—'}</div>
+                        ${vp > 0 ? `<div class="text-[9px] text-amber-300/85 font-normal mt-0.5">${Math.round(vp)} Kč</div>` : ''}
+                    </div>
+                </td>`;
             }).join('')}
             <td class="num font-semibold">${fmtCZK(contractMonthlyPremium(c))}</td>
             <td>
@@ -944,166 +1010,336 @@
             (which === 'current' ? 'Stávající smlouva — ' : 'Smlouva v návrhu — ') + (c.insurer || 'Nová položka');
 
         const body = document.getElementById('contractModalBody');
-        const insurerOptions = D.INSURERS.map(ins =>
+        const collator = new Intl.Collator('cs', { sensitivity: 'base' });
+        const sortedInsurers = [...D.INSURERS].sort((a, b) => collator.compare(a.name, b.name));
+        const insurerOptions = sortedInsurers.map(ins =>
             `<option value="${escapeHtml(ins.name)}" ${c.insurer === ins.name ? 'selected' : ''}>${escapeHtml(ins.name)} (${escapeHtml(ins.productLine)})</option>`).join('');
         const clientOptions = state.clients.map(cl =>
             `<option value="${cl.id}" ${c.clientId === cl.id ? 'selected' : ''}>${escapeHtml(cl.name)}</option>`).join('');
         const actionsList = D.CONTRACT_ACTIONS[which] || [];
         const curStatus = which === 'current' ? (c.actionStatus || 'keep') : (c.proposalStatus || 'new');
         const cond = c.conditions || {};
+        const isOtherInsurer = !!(c.insurer && !D.INSURER_NAMES.includes(c.insurer));
 
         const groupedInputsHtml = D.CATEGORY_GROUPS.map(grp => {
             const cats = D.CATEGORIES.filter(cat => cat.group === grp.key);
+            const grpPremSum = cats.reduce((acc, cat) => acc + num(c.itemPremiums && c.itemPremiums[cat.key]), 0);
             return `
-                <div class="p-3 rounded border border-slate-800 bg-slate-950/50 mb-3">
-                    <div class="flex items-center justify-between mb-2">
+                <div class="form-block">
+                    <div class="form-block-header">
                         <span class="badge badge-${grp.color}">${escapeHtml(grp.label)}</span>
-                        ${grp.key === 'disability' ? `
-                            <button type="button" onclick="app.copyInv3ToAll()" class="text-[10px] text-sky-400 hover:underline font-mono">
-                                ↳ Zkopírovat částku Inv. III do Inv. II a Inv. I
-                            </button>` : ''}
+                        <div class="flex items-center gap-2 flex-wrap">
+                            ${grp.key === 'disability' ? `
+                                <button type="button" onclick="app.copyInv3ToAll()" class="text-[10px] text-sky-400 hover:underline font-mono">
+                                    ↳ Zkopírovat částku Inv. III do Inv. II a Inv. I
+                                </button>` : ''}
+                            ${grp.key === 'income' ? `
+                                <div class="flex items-center gap-1 text-[10px] bg-slate-900/90 border border-slate-700/80 rounded px-1.5 py-0.5">
+                                    <span class="text-slate-400 uppercase font-mono">Režim PN:</span>
+                                    <button type="button" id="mod_pnUnit_daily" onclick="app.setPnModalUnit('daily')" class="px-1.5 py-0.5 rounded font-mono font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">Kč/den</button>
+                                    <button type="button" id="mod_pnUnit_monthly" onclick="app.setPnModalUnit('monthly')" class="px-1.5 py-0.5 rounded font-mono text-slate-400 hover:text-slate-200">Kč/měs (MZ6Z0)</button>
+                                </div>` : ''}
+                            <span class="text-[11px] font-mono text-amber-300 font-semibold" id="mod_grp_prem_${grp.key}">
+                                Σ ${fmt(grpPremSum)} Kč/měs
+                            </span>
+                        </div>
                     </div>
-                    <div class="ins-grid">
+                    <div class="form-cov-head">
+                        <span>Druh pojištění (riziko)</span>
+                        <span>Pojistná částka / dávka</span>
+                        <span>Pojistné (Kč/měs)</span>
+                    </div>
+                    <div class="form-block-body">
                         ${cats.map(cat => {
-                            const unit = cat.kind === 'daily' ? '(Kč/den)' : cat.kind === 'monthly' ? '(Kč/měs)' : '(Kč)';
+                            const unit = cat.kind === 'daily' ? 'Kč/den' : cat.kind === 'monthly' ? 'Kč/měs' : 'Kč';
                             const step = cat.kind === 'daily' ? 50 : cat.kind === 'monthly' ? 500 : 50000;
+                            const val = num(c.items && c.items[cat.key]);
+                            const premVal = num(c.itemPremiums && c.itemPremiums[cat.key]);
                             return `
-                                <label title="${escapeHtml(cat.help)}">
-                                    <span>${escapeHtml(cat.label)} <strong class="text-slate-500">${unit}</strong></span>
-                                    <input type="number" class="pro-input" min="0" step="${step}"
-                                        id="mod_item_${cat.key}" value="${num(c.items && c.items[cat.key])}">
-                                </label>`;
+                                <div class="form-row-cov" title="${escapeHtml(cat.help)}">
+                                    <label class="form-label" for="mod_item_${cat.key}">
+                                        <div class="flex items-center gap-1.5 flex-wrap">
+                                            <span>${escapeHtml(cat.label)}</span>
+                                            <span class="tariff-tag hidden" id="mod_badge_${cat.key}"></span>
+                                        </div>
+                                        <span class="form-unit" id="mod_unit_${cat.key}">${unit}</span>
+                                    </label>
+                                    <div>
+                                        <input type="number" class="pro-input num-input ${val > 0 ? 'has-val' : ''}" min="0" step="${step}"
+                                            id="mod_item_${cat.key}" value="${val}"
+                                            placeholder="Pojistná částka (${unit})"
+                                            oninput="this.classList.toggle('has-val', Number(this.value) > 0)">
+                                    </div>
+                                    <div>
+                                        <input type="number" class="pro-input prem-input ${premVal > 0 ? 'has-val' : ''}" min="0" step="1"
+                                            id="mod_prem_${cat.key}" value="${premVal}"
+                                            placeholder="Kč/měs"
+                                            oninput="this.classList.toggle('has-val', Number(this.value) > 0); app.recalcModalItemPremiums(true)">
+                                    </div>
+                                </div>`;
                         }).join('')}
+                    </div>
+                    <div class="form-block-footer">
+                        <span>Mezisoučet pojistného bloku (${escapeHtml(grp.label)}):</span>
+                        <span class="font-mono font-bold text-amber-300" id="mod_grp_prem_foot_${grp.key}">${fmt(grpPremSum)} Kč/měs</span>
                     </div>
                 </div>`;
         }).join('');
 
+        const totalItemPremSum = sumContractItemPremiums(c);
+
         body.innerHTML = `
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Pojištěná osoba</span>
-                    <select class="pro-input" id="mod_client">${clientOptions}</select>
-                </label>
-                <label class="block lg:col-span-2">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Pojišťovna a produktová řada</span>
-                    <select class="pro-input" id="mod_insurer">
-                        <option value="">-- vyberte pojišťovnu --</option>
-                        ${insurerOptions}
-                        <option value="OTHER" ${c.insurer && !D.INSURER_NAMES.includes(c.insurer) ? 'selected' : ''}>Jiná pojišťovna…</option>
-                    </select>
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Číslo smlouvy / označení</span>
-                    <input type="text" class="pro-input" id="mod_contractNo" value="${escapeHtml(c.contractNo || '')}" placeholder="např. 1317491203">
-                </label>
-                <label class="block" id="mod_otherInsurerWrap" style="display:${(c.insurer && !D.INSURER_NAMES.includes(c.insurer)) ? 'block' : 'none'}">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Jiná pojišťovna — název</span>
-                    <input type="text" class="pro-input" id="mod_otherInsurer" value="${escapeHtml(c.insurer && !D.INSURER_NAMES.includes(c.insurer) ? c.insurer : '')}">
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Počátek / Konec (rok)</span>
-                    <div class="flex gap-1.5">
-                        <input type="number" class="pro-input" id="mod_start" min="1980" max="2060" placeholder="Od" value="${c.start || ''}">
-                        <input type="number" class="pro-input" id="mod_end" min="2020" max="2100" placeholder="Do" value="${c.end || ''}">
+            <div class="mb-4 p-3 rounded-lg border border-emerald-500/35 bg-emerald-950/20 flex items-center justify-between gap-3 flex-wrap">
+                <div class="flex items-center gap-2.5">
+                    <div class="w-8 h-8 rounded bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                        <i data-lucide="file-up" class="w-4 h-4"></i>
                     </div>
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Pojistné (Kč) & Frekvence</span>
-                    <div class="flex gap-1.5">
-                        <input type="number" class="pro-input" id="mod_premium" min="0" step="10" value="${c.premium || 0}">
-                        <select class="pro-input" id="mod_freq" style="width:110px">
-                            <option value="monthly"   ${cond.paymentFrequency === 'monthly' || !cond.paymentFrequency ? 'selected' : ''}>Měsíčně</option>
-                            <option value="quarterly" ${cond.paymentFrequency === 'quarterly' ? 'selected' : ''}>Čtvrtletně</option>
-                            <option value="yearly"    ${cond.paymentFrequency === 'yearly' ? 'selected' : ''}>Ročně</option>
-                            <option value="singlepay" ${cond.paymentFrequency === 'singlepay' ? 'selected' : ''}>Jednoráz.</option>
-                        </select>
+                    <div>
+                        <div class="text-xs font-semibold text-slate-100">Automatické vyplnění formuláře z dokumentu platné smlouvy</div>
+                        <div class="text-[11px] text-slate-400" id="mod_inlineUploadStatus">
+                            Nahrajte PDF pojistku, výroční dopis, přehled krytí nebo fotku smlouvy — pole níže (včetně pojistné částky i pojistného za položku) se automaticky předvyplní.
+                        </div>
                     </div>
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-sky-400 font-bold mb-1">Doporučení poradce ke smlouvě</span>
-                    <select class="pro-input" id="mod_actionStatus">
-                        ${actionsList.map(a => `<option value="${a.key}" ${curStatus === a.key ? 'selected' : ''}>${escapeHtml(a.label)}</option>`).join('')}
-                    </select>
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Typ produktu</span>
-                    <select class="pro-input" id="mod_contractType">
-                        <option value="risk"     ${cond.contractType === 'risk' || !cond.contractType ? 'selected' : ''}>Rizikové ŽP (RŽP)</option>
-                        <option value="invest"   ${cond.contractType === 'invest' ? 'selected' : ''}>Investiční ŽP (IŽP)</option>
-                        <option value="capital"  ${cond.contractType === 'capital' ? 'selected' : ''}>Kapitálové ŽP (KŽP)</option>
-                        <option value="accident" ${cond.contractType === 'accident' ? 'selected' : ''}>Samostatné úrazové</option>
-                    </select>
-                </label>
-                <label class="block md:col-span-2 lg:col-span-4">
-                    <span class="block text-[10px] uppercase tracking-wide text-amber-400 font-bold mb-1">Zdůvodnění doporučení poradce u této smlouvy (zobrazí se i v tisku pro klienta)</span>
-                    <input type="text" class="pro-input" id="mod_actionReason"
-                        placeholder="např. Ponechat z důvodu prodělaného kardiologického vyšetření v r. 2021 – nová smlouva by měla výluku…"
-                        value="${escapeHtml(c.actionReason || c.note || '')}">
+                </div>
+                <label class="btn-secondary cursor-pointer shrink-0" style="border-color:rgba(16,185,129,0.55);color:#6ee7b7;background:rgba(16,185,129,0.15)">
+                    <i data-lucide="upload" class="w-3.5 h-3.5"></i>Vybrat soubor smlouvy (.pdf / foto / .txt)
+                    <input type="file" class="hidden" accept=".pdf,.jpg,.jpeg,.png,.webp,.txt,.json" onchange="app.handleInlineModalFileUpload(event)">
                 </label>
             </div>
 
-            <div class="flex items-center justify-between mb-2">
-                <h4 class="text-xs font-bold uppercase text-slate-300 flex items-center gap-2">
-                    <i data-lucide="layers" class="w-3.5 h-3.5 text-sky-400"></i>
-                    Sjednaná pojistná rizika (32 kategorií dle skupin)
-                </h4>
-                <button type="button" onclick="app.applyInsurerDefaults()" class="btn-secondary">
-                    <i data-lucide="zap" class="w-3.5 h-3.5 text-amber-400"></i>Předvyplnit podmínky dle pojišťovny
-                </button>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+                <!-- BLOK 1: ZÁKLADNÍ IDENTIFIKACE SMLOUVY -->
+                <div class="form-block">
+                    <div class="form-block-header">
+                        <span class="badge badge-sky">1. Identifikace smlouvy a pojistného</span>
+                        <span class="text-[10px] text-slate-400 font-mono">Základní parametry</span>
+                    </div>
+                    <div class="form-block-body">
+                        <div class="form-row">
+                            <label class="form-label" for="mod_client"><span>Pojištěná osoba</span></label>
+                            <div class="form-field">
+                                <select class="pro-input" id="mod_client">${clientOptions}</select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_insurer"><span>Pojišťovna a produktová řada</span></label>
+                            <div class="form-field">
+                                <select class="pro-input" id="mod_insurer">
+                                    <option value="">-- vyberte pojišťovnu (A–Z) --</option>
+                                    ${insurerOptions}
+                                    <option value="OTHER" ${isOtherInsurer ? 'selected' : ''}>Jiná pojišťovna…</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row ${isOtherInsurer ? '' : 'hidden'}" id="mod_otherInsurerWrap">
+                            <label class="form-label" for="mod_otherInsurer"><span>Jiná pojišťovna — vlastní název</span></label>
+                            <div class="form-field">
+                                <input type="text" class="pro-input" id="mod_otherInsurer" placeholder="Zadejte název pojišťovny"
+                                    value="${escapeHtml(isOtherInsurer ? c.insurer : '')}">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_contractNo"><span>Číslo smlouvy / označení</span></label>
+                            <div class="form-field">
+                                <input type="text" class="pro-input font-mono" id="mod_contractNo" value="${escapeHtml(c.contractNo || '')}" placeholder="např. 1317491203">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_contractType"><span>Typ produktu</span></label>
+                            <div class="form-field">
+                                <select class="pro-input" id="mod_contractType">
+                                    <option value="risk"     ${cond.contractType === 'risk' || !cond.contractType ? 'selected' : ''}>Rizikové ŽP (RŽP)</option>
+                                    <option value="invest"   ${cond.contractType === 'invest' ? 'selected' : ''}>Investiční ŽP (IŽP)</option>
+                                    <option value="capital"  ${cond.contractType === 'capital' ? 'selected' : ''}>Kapitálové ŽP (KŽP)</option>
+                                    <option value="accident" ${cond.contractType === 'accident' ? 'selected' : ''}>Samostatné úrazové</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_start">
+                                <span>Počátek a konec pojištění</span>
+                                <span class="form-unit">Rok Od–Do</span>
+                            </label>
+                            <div class="form-field">
+                                <input type="number" class="pro-input num-input" id="mod_start" min="1980" max="2060" placeholder="Od" value="${c.start || ''}">
+                                <span class="text-slate-500 font-mono">–</span>
+                                <input type="number" class="pro-input num-input" id="mod_end" min="2020" max="2100" placeholder="Do" value="${c.end || ''}">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_premium">
+                                <span>Celkové běžné pojistné</span>
+                                <span class="form-unit">Kč</span>
+                            </label>
+                            <div class="form-field">
+                                <input type="number" class="pro-input num-input ${num(c.premium) > 0 ? 'has-val' : ''}" id="mod_premium" min="0" step="1" value="${c.premium || 0}"
+                                    oninput="this.classList.toggle('has-val', Number(this.value) > 0); app.recalcModalItemPremiums(false)">
+                                <select class="pro-input" id="mod_freq" style="width:115px;flex-shrink:0">
+                                    <option value="monthly"   ${cond.paymentFrequency === 'monthly' || !cond.paymentFrequency ? 'selected' : ''}>Měsíčně</option>
+                                    <option value="quarterly" ${cond.paymentFrequency === 'quarterly' ? 'selected' : ''}>Čtvrtletně</option>
+                                    <option value="yearly"    ${cond.paymentFrequency === 'yearly' ? 'selected' : ''}>Ročně</option>
+                                    <option value="singlepay" ${cond.paymentFrequency === 'singlepay' ? 'selected' : ''}>Jednoráz.</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- BLOK 2: DOPORUČENÍ PORADCE A PARAMETRY SMLOUVY -->
+                <div class="form-block">
+                    <div class="form-block-header">
+                        <span class="badge badge-amber">2. Doporučení poradce a parametry smlouvy</span>
+                        <button type="button" onclick="app.applyInsurerDefaults()" class="text-[10px] text-amber-300 hover:underline font-mono flex items-center gap-1">
+                            <i data-lucide="zap" class="w-3 h-3"></i>Předvyplnit dle pojišťovny
+                        </button>
+                    </div>
+                    <div class="form-block-body">
+                        <div class="form-row">
+                            <label class="form-label" for="mod_actionStatus"><span class="text-sky-300 font-semibold">Doporučení poradce ke smlouvě</span></label>
+                            <div class="form-field">
+                                <select class="pro-input" id="mod_actionStatus">
+                                    ${actionsList.map(a => `<option value="${a.key}" ${curStatus === a.key ? 'selected' : ''}>${escapeHtml(a.label)}</option>`).join('')}
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_actionReason"><span class="text-amber-300">Zdůvodnění doporučení (pro tisk)</span></label>
+                            <div class="form-field">
+                                <input type="text" class="pro-input" id="mod_actionReason"
+                                    placeholder="např. Ponechat kvůli zdravotní historii…"
+                                    value="${escapeHtml(c.actionReason || c.note || '')}">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_tnProg"><span>Progrese u trvalých následků (TN)</span></label>
+                            <div class="form-field">
+                                <select class="pro-input" id="mod_tnProg">
+                                    <option value="100"  ${num(cond.tnProgression) === 100 ? 'selected' : ''}>100 % (bez progrese / lineární)</option>
+                                    <option value="400"  ${num(cond.tnProgression) === 400 ? 'selected' : ''}>400 % (4násobek u vážných TN)</option>
+                                    <option value="500"  ${num(cond.tnProgression) === 500 ? 'selected' : ''}>500 % (5násobek)</option>
+                                    <option value="600"  ${num(cond.tnProgression) === 600 ? 'selected' : ''}>600 % (6násobek)</option>
+                                    <option value="800"  ${num(cond.tnProgression) === 800 || !cond.tnProgression ? 'selected' : ''}>800 % (8násobek — KOOP/ALZ/NN)</option>
+                                    <option value="1000" ${num(cond.tnProgression) === 1000 ? 'selected' : ''}>1000 % (10násobek — UNI/GČP/SIM/MET)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_pnFromDay"><span>PN — karenční doba (plnění od dne)</span></label>
+                            <div class="form-field">
+                                <select class="pro-input" id="mod_pnFromDay">
+                                    <option value="1"  ${num(cond.pnFromDay) === 1 ? 'selected' : ''}>Od 1. dne</option>
+                                    <option value="15" ${num(cond.pnFromDay) === 15 ? 'selected' : ''}>Od 15. dne</option>
+                                    <option value="22" ${num(cond.pnFromDay) === 22 ? 'selected' : ''}>Od 22. dne</option>
+                                    <option value="29" ${num(cond.pnFromDay) === 29 || !cond.pnFromDay ? 'selected' : ''}>Od 29. dne</option>
+                                    <option value="61" ${num(cond.pnFromDay) === 61 ? 'selected' : ''}>Od 61. dne</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_empContrib">
+                                <span>Příspěvek zaměstnavatele</span>
+                                <span class="form-unit">Kč/měs</span>
+                            </label>
+                            <div class="form-field">
+                                <input type="number" class="pro-input num-input" id="mod_empContrib" min="0" step="100" value="${num(cond.employerContribution)}">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label class="form-label" for="mod_taxDeduct">
+                                <span>Daňově uznatelné (LTC / spoř.)</span>
+                                <span class="form-unit">Kč/rok</span>
+                            </label>
+                            <div class="form-field">
+                                <input type="number" class="pro-input num-input" id="mod_taxDeduct" min="0" step="1000" value="${num(cond.taxDeductibleAnnual)}">
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
-            ${groupedInputsHtml}
+            <!-- KONTROLNÍ PÁS ROZPOČÍTÁNÍ POJISTNÉHO ZA POLOŽKY -->
+            <div class="mb-3 p-3 rounded-lg border border-amber-500/35 bg-amber-950/20 flex items-center justify-between gap-3 flex-wrap">
+                <div class="flex items-center gap-3 flex-wrap">
+                    <div class="flex items-center gap-2">
+                        <i data-lucide="calculator" class="w-4 h-4 text-amber-400"></i>
+                        <span class="text-xs font-bold uppercase text-slate-200">Sjednaná pojistná rizika — Pojistná částka & Pojistné za položku</span>
+                    </div>
+                    <span class="text-[11px] font-mono px-2.5 py-1 rounded bg-slate-900/80 border border-slate-700 text-slate-300" id="mod_itemPremSummary">
+                        Součet položek pojistného: <strong class="text-amber-300">${fmt(totalItemPremSum)} Kč/měs</strong>
+                        (Celkové pojistné smlouvy: <strong class="text-sky-300">${fmt(num(c.premium))} Kč</strong>)
+                    </span>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <button type="button" onclick="app.syncTotalPremiumFromItems()" class="btn-secondary text-[11px] py-1 px-2.5" title="Nastaví celkové pojistné smlouvy přesně podle součtu jednotlivých položek">
+                        <i data-lucide="sigma" class="w-3.5 h-3.5 text-amber-400"></i>Sečíst položky do celkového pojistného
+                    </button>
+                    <button type="button" onclick="app.distributeTotalPremiumToItems()" class="btn-secondary text-[11px] py-1 px-2.5" title="Rozpočítá celkové pojistné smlouvy mezi sjednané položky dle pojistně-matematických sazeb">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 text-sky-400"></i>Odhadnout pojistné položek z celkového
+                    </button>
+                </div>
+            </div>
 
-            <h4 class="text-xs font-bold uppercase text-slate-300 mb-2 mt-4 flex items-center gap-2">
-                <i data-lucide="settings-2" class="w-3.5 h-3.5 text-violet-400"></i>
-                Detailní podmínky smlouvy, progrese a daňové benefity
-            </h4>
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-3 rounded border border-slate-800 bg-slate-950/50 mb-4">
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Progrese u trvalých následků (TN)</span>
-                    <select class="pro-input" id="mod_tnProg">
-                        <option value="100"  ${num(cond.tnProgression) === 100 ? 'selected' : ''}>100 % (bez progrese / lineární)</option>
-                        <option value="400"  ${num(cond.tnProgression) === 400 ? 'selected' : ''}>400 % (4násobek u vážných TN)</option>
-                        <option value="500"  ${num(cond.tnProgression) === 500 ? 'selected' : ''}>500 % (5násobek)</option>
-                        <option value="600"  ${num(cond.tnProgression) === 600 ? 'selected' : ''}>600 % (6násobek)</option>
-                        <option value="800"  ${num(cond.tnProgression) === 800 || !cond.tnProgression ? 'selected' : ''}>800 % (8násobek — KOOP/ALZ/NN)</option>
-                        <option value="1000" ${num(cond.tnProgression) === 1000 ? 'selected' : ''}>1000 % (10násobek — UNI/GČP/SIM/MET)</option>
-                    </select>
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">PN — karenční doba (plnění od dne)</span>
-                    <select class="pro-input" id="mod_pnFromDay">
-                        <option value="1"  ${num(cond.pnFromDay) === 1 ? 'selected' : ''}>Od 1. dne</option>
-                        <option value="15" ${num(cond.pnFromDay) === 15 ? 'selected' : ''}>Od 15. dne</option>
-                        <option value="22" ${num(cond.pnFromDay) === 22 ? 'selected' : ''}>Od 22. dne</option>
-                        <option value="29" ${num(cond.pnFromDay) === 29 || !cond.pnFromDay ? 'selected' : ''}>Od 29. dne</option>
-                        <option value="61" ${num(cond.pnFromDay) === 61 ? 'selected' : ''}>Od 61. dne</option>
-                    </select>
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Příspěvek zaměstnavatele (Kč/měs)</span>
-                    <input type="number" class="pro-input" id="mod_empContrib" min="0" step="100" value="${num(cond.employerContribution)}">
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Daňově uznatelné (LTC/spoř. Kč/rok)</span>
-                    <input type="number" class="pro-input" id="mod_taxDeduct" min="0" step="1000" value="${num(cond.taxDeductibleAnnual)}">
-                </label>
-                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                    <input type="checkbox" class="pro-input" id="mod_pnRetroactive" ${cond.pnRetroactive ? 'checked' : ''}>
-                    <span>PN <strong>zpětně od 1. dne</strong></span>
-                </label>
-                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                    <input type="checkbox" class="pro-input" id="mod_invPsych" ${cond.invPsychIncluded !== false ? 'checked' : ''}>
-                    <span>Kryje <strong>psychické dg. (F)</strong> v invaliditě</span>
-                </label>
-                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                    <input type="checkbox" class="pro-input" id="mod_backPain" ${cond.backPainIncluded ? 'checked' : ''}>
-                    <span>Rozšířené krytí <strong>páteře / zad</strong></span>
-                </label>
-                <label class="block">
-                    <span class="block text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Riziková skupina povolání</span>
-                    <input type="text" class="pro-input" id="mod_occCat" placeholder="např. RS 1" value="${escapeHtml(cond.occupationCategory || '1')}">
-                </label>
+            <!-- ASISTENT HYPOTEČNÍHO KRYTÍ „PRVNÍ Z RIZIK“ -->
+            <div class="mb-3.5 p-3 rounded-lg border border-amber-500/35 bg-gradient-to-r from-amber-950/25 via-slate-900/40 to-sky-950/25 flex items-center justify-between gap-3 flex-wrap">
+                <div class="flex items-center gap-2.5">
+                    <span class="badge badge-amber font-mono font-bold">⚡ Úvěrový balíček „První z rizik“</span>
+                    <span class="text-xs text-slate-300">
+                        Klesající krytí k hypotéce (Generali tarif <strong>PR201 / PR02B</strong>, Kooperativa <strong>HYS + HYI</strong>, ČSOB) — jedna klesající částka chrání souběžně smrt i invaliditu.
+                    </span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <input type="number" id="mod_quickMortgageAmount" class="pro-input num-input text-xs w-36" placeholder="Částka hypotéky v Kč" step="50000">
+                    <button type="button" onclick="app.applyMortgageComboInModal()" class="btn-secondary text-xs py-1 px-2.5" style="border-color:rgba(245,158,11,0.5);color:#fcd34d">
+                        <i data-lucide="link" class="w-3.5 h-3.5 text-amber-400"></i>Nastavit do Smrti i Inv. kles.
+                    </button>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+                ${groupedInputsHtml}
+            </div>
+
+            <!-- BLOK PODMÍNEK A VÝLUK -->
+            <div class="form-block mb-4">
+                <div class="form-block-header">
+                    <span class="badge badge-violet">Detailní kvalitativní podmínky smlouvy a výluky</span>
+                    <span class="text-[10px] text-slate-400 font-mono">Ovlivňuje Skóre zdraví pojištění</span>
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 form-block-body">
+                    <div class="form-row">
+                        <label class="form-label" for="mod_pnRetroactive"><span>Pracovní neschopnost <strong>zpětně od 1. dne</strong></span></label>
+                        <div class="form-field justify-end">
+                            <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                <input type="checkbox" class="pro-input" id="mod_pnRetroactive" ${cond.pnRetroactive ? 'checked' : ''}>
+                                <span>Ano, plní zpětně od 1. dne</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label" for="mod_invPsych"><span>Kryje <strong>psychické diagnózy (F)</strong> v invaliditě</span></label>
+                        <div class="form-field justify-end">
+                            <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                <input type="checkbox" class="pro-input" id="mod_invPsych" ${cond.invPsychIncluded !== false ? 'checked' : ''}>
+                                <span>Ano, včetně psychických dg.</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label" for="mod_backPain"><span>Rozšířené krytí <strong>páteře a bolestí zad</strong></span></label>
+                        <div class="form-field justify-end">
+                            <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                <input type="checkbox" class="pro-input" id="mod_backPain" ${cond.backPainIncluded ? 'checked' : ''}>
+                                <span>Ano, bez plošné výluky na záda</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <label class="form-label" for="mod_occCat"><span>Riziková skupina povolání</span></label>
+                        <div class="form-field">
+                            <input type="text" class="pro-input" id="mod_occCat" placeholder="např. RS 1" value="${escapeHtml(cond.occupationCategory || '1')}">
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="flex justify-end items-center gap-2 mt-4">
@@ -1113,12 +1349,166 @@
                 </button>
             </div>
         `;
+        currentPnModalUnit = 'daily';
         document.getElementById('contractModal').classList.remove('hidden');
         document.getElementById('contractModal').classList.add('flex');
         document.getElementById('mod_insurer').addEventListener('change', function () {
-            document.getElementById('mod_otherInsurerWrap').style.display = this.value === 'OTHER' ? 'block' : 'none';
+            const wrap = document.getElementById('mod_otherInsurerWrap');
+            if (wrap) wrap.classList.toggle('hidden', this.value !== 'OTHER');
+            updateModalInsurerBadges();
         });
+        updateModalInsurerBadges();
         if (window.lucide) lucide.createIcons();
+    }
+
+    /* Dynamická aktualizace tarifních kódů / nápovědy k pojišťovně v modalu */
+    function updateModalInsurerBadges() {
+        const sel = document.getElementById('mod_insurer');
+        if (!sel) return;
+        const insName = (sel.value || '').trim();
+        const guideKey = Object.keys(D.INSURER_TARIFF_GUIDES || {}).find(k => k === insName || insName.startsWith(k) || k.startsWith(insName));
+        const guide = guideKey ? D.INSURER_TARIFF_GUIDES[guideKey] : null;
+
+        D.CATEGORIES.forEach(cat => {
+            const badge = document.getElementById('mod_badge_' + cat.key);
+            if (!badge) return;
+            if (guide && guide[cat.key]) {
+                badge.textContent = guide[cat.key].code;
+                badge.title = guide[cat.key].hint || guide[cat.key].code;
+                badge.classList.remove('hidden');
+            } else {
+                badge.textContent = '';
+                badge.classList.add('hidden');
+            }
+        });
+    }
+
+    /* Rychlý hypoteční asistent: nastaví zadanou klesající částku do Smrti klesající i Invalidity klesající */
+    function applyMortgageComboInModal() {
+        const inp = document.getElementById('mod_quickMortgageAmount');
+        if (!inp) return;
+        const val = num(inp.value);
+        if (val <= 0) {
+            toast('Zadejte částku hypotéky/úvěru v Kč (např. 500 000 Kč).', 'info');
+            return;
+        }
+        const smrtKlesEl = document.getElementById('mod_item_smrtKles');
+        const invKlesEl = document.getElementById('mod_item_invKles');
+        if (smrtKlesEl) {
+            smrtKlesEl.value = val;
+            smrtKlesEl.classList.add('has-val');
+        }
+        if (invKlesEl) {
+            invKlesEl.value = val;
+            invKlesEl.classList.add('has-val');
+        }
+        toast(`Nastaveno ${fmt(val)} Kč do Smrti klesající i Invalidity klesající (hypotéka)`, 'success');
+    }
+
+    /* Přepínač režimu zadávání pracovní neschopnosti: Kč/den ↔ Kč/měs */
+    let currentPnModalUnit = 'daily';
+    function setPnModalUnit(unit) {
+        if (unit === currentPnModalUnit) return;
+        currentPnModalUnit = unit;
+        const btnD = document.getElementById('mod_pnUnit_daily');
+        const btnM = document.getElementById('mod_pnUnit_monthly');
+        if (btnD && btnM) {
+            if (unit === 'monthly') {
+                btnM.className = 'px-1.5 py-0.5 rounded font-mono font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40';
+                btnD.className = 'px-1.5 py-0.5 rounded font-mono text-slate-400 hover:text-slate-200';
+            } else {
+                btnD.className = 'px-1.5 py-0.5 rounded font-mono font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40';
+                btnM.className = 'px-1.5 py-0.5 rounded font-mono text-slate-400 hover:text-slate-200';
+            }
+        }
+        ['pn15', 'pn28', 'pn61'].forEach(k => {
+            const inp = document.getElementById('mod_item_' + k);
+            const uEl = document.getElementById('mod_unit_' + k);
+            if (inp) {
+                const curVal = num(inp.value);
+                if (unit === 'monthly') {
+                    if (curVal > 0) inp.value = Math.round(curVal * 30);
+                    inp.placeholder = 'Kč/měs (např. 10 000)';
+                    inp.step = '500';
+                    if (uEl) uEl.textContent = 'Kč/měs';
+                } else {
+                    if (curVal > 0) inp.value = Math.round(curVal / 30);
+                    inp.placeholder = 'Kč/den (např. 300)';
+                    inp.step = '50';
+                    if (uEl) uEl.textContent = 'Kč/den';
+                }
+            }
+        });
+    }
+
+    function recalcModalItemPremiums(autoSyncTotal = false) {
+        let totalSum = 0;
+        D.CATEGORY_GROUPS.forEach(grp => {
+            const cats = D.CATEGORIES.filter(cat => cat.group === grp.key);
+            let grpSum = 0;
+            cats.forEach(cat => {
+                const el = document.getElementById('mod_prem_' + cat.key);
+                if (el) grpSum += num(el.value);
+            });
+            totalSum += grpSum;
+            const headEl = document.getElementById('mod_grp_prem_' + grp.key);
+            const footEl = document.getElementById('mod_grp_prem_foot_' + grp.key);
+            if (headEl) headEl.textContent = `Σ ${fmt(grpSum)} Kč/měs`;
+            if (footEl) footEl.textContent = `${fmt(grpSum)} Kč/měs`;
+        });
+        const totalInput = document.getElementById('mod_premium');
+        if (autoSyncTotal && totalInput && totalSum > 0) {
+            totalInput.value = totalSum;
+            totalInput.classList.toggle('has-val', totalSum > 0);
+        }
+        const curTotal = totalInput ? num(totalInput.value) : 0;
+        const sumEl = document.getElementById('mod_itemPremSummary');
+        if (sumEl) {
+            const diff = curTotal - totalSum;
+            const diffBadge = diff === 0
+                ? `<span class="text-emerald-400">✓ Souhlasí se součtem</span>`
+                : `<span class="text-amber-300">Rozdíl: ${diff > 0 ? '+' : ''}${fmt(diff)} Kč</span>`;
+            sumEl.innerHTML = `Součet položek pojistného: <strong class="text-amber-300">${fmt(totalSum)} Kč/měs</strong> · Celkové pojistné: <strong class="text-sky-300">${fmt(curTotal)} Kč</strong> (${diffBadge})`;
+        }
+        return totalSum;
+    }
+
+    function syncTotalPremiumFromItems() {
+        const sum = recalcModalItemPremiums(true);
+        const totalInput = document.getElementById('mod_premium');
+        if (totalInput) {
+            totalInput.value = sum;
+            totalInput.classList.toggle('has-val', sum > 0);
+        }
+        recalcModalItemPremiums(false);
+        toast(`Celkové pojistné nastaveno na součet položek: ${fmt(sum)} Kč/měs`, 'success');
+    }
+
+    function distributeTotalPremiumToItems() {
+        const totalInput = document.getElementById('mod_premium');
+        const total = totalInput ? num(totalInput.value) : 0;
+        const items = {};
+        D.CATEGORIES.forEach(cat => {
+            const el = document.getElementById('mod_item_' + cat.key);
+            items[cat.key] = el ? num(el.value) : 0;
+        });
+        const est = D.estimateItemPremiums ? D.estimateItemPremiums(items, total) : {};
+        let estSum = 0;
+        D.CATEGORIES.forEach(cat => {
+            const el = document.getElementById('mod_prem_' + cat.key);
+            const v = num(est[cat.key]);
+            estSum += v;
+            if (el) {
+                el.value = v;
+                el.classList.toggle('has-val', v > 0);
+            }
+        });
+        if (total === 0 && estSum > 0 && totalInput) {
+            totalInput.value = estSum;
+            totalInput.classList.toggle('has-val', true);
+        }
+        recalcModalItemPremiums(false);
+        toast(`Pojistné rozpočítáno mezi sjednané položky (Σ ${fmt(estSum)} Kč/měs)`, 'info');
     }
 
     function copyInv3ToAll() {
@@ -1127,8 +1517,8 @@
         const el1 = document.getElementById('mod_item_inv1');
         if (!el3) return;
         const v = num(el3.value);
-        if (el2) el2.value = v;
-        if (el1) el1.value = Math.round(v * 0.5);
+        if (el2) { el2.value = v; el2.classList.toggle('has-val', v > 0); }
+        if (el1) { const v1 = Math.round(v * 0.5); el1.value = v1; el1.classList.toggle('has-val', v1 > 0); }
         toast('Invalidita II nastavena na 100 % a Inv. I na 50 % částky Inv. III', 'info');
     }
 
@@ -1191,16 +1581,35 @@
         c.conditions.taxDeductibleAnnual = num(document.getElementById('mod_taxDeduct').value);
 
         c.items = c.items || {};
+        c.itemPremiums = c.itemPremiums || {};
+        let sumIP = 0;
         D.CATEGORIES.forEach(cat => {
             const el = document.getElementById('mod_item_' + cat.key);
             if (el) c.items[cat.key] = num(el.value);
+            const pel = document.getElementById('mod_prem_' + cat.key);
+            if (pel) {
+                const pv = num(pel.value);
+                c.itemPremiums[cat.key] = pv;
+                sumIP += pv;
+            }
         });
+        /* Pokud bylo zadáváno v měsíčním režimu PN (Kč/měs), převedeme zpět na denní dávku Kč/den */
+        if (currentPnModalUnit === 'monthly') {
+            ['pn15', 'pn28', 'pn61'].forEach(k => {
+                if (c.items[k] > 0) c.items[k] = Math.round(c.items[k] / 30);
+            });
+        }
+        if (c.premium === 0 && sumIP > 0) {
+            c.premium = sumIP;
+        } else if (sumIP === 0 && c.premium > 0 && D.estimateItemPremiums) {
+            c.itemPremiums = D.estimateItemPremiums(c.items, c.premium);
+        }
 
         save();
         closeContractModal();
         renderContractsGroup(which);
         renderKPIs();
-        toast('Smlouva uložena', 'success');
+        toast('Smlouva uložena (včetně rozpadu pojistného po položkách)', 'success');
     }
 
     /* ════════════ TAB 4: NEEDS ANALYSIS & TAX BENEFIT CALCULATOR ════════════ */
@@ -1950,12 +2359,17 @@
         let html = `
             <div class="cmp-row cmp-row-header">
                 <div>Pojistné riziko / kategorie</div>
-                <div class="text-right">Stávající</div>
-                <div class="text-right">Návrh poradce</div>
-                <div class="text-right">Rozdíl (Δ)</div>
+                <div class="text-right">Stávající PČ</div>
+                <div class="text-right text-amber-300/90">Stáv. pojistné</div>
+                <div class="text-right">Návrh PČ</div>
+                <div class="text-right text-sky-300/90">Návrh pojistné</div>
+                <div class="text-right">Rozdíl PČ &amp; ceny (Δ)</div>
                 <div class="text-right">Hodnocení změny</div>
             </div>
         `;
+
+        let totalCurItemPrem = 0;
+        let totalNwItemPrem = 0;
 
         D.CATEGORY_GROUPS.forEach(grp => {
             const grpCats = D.CATEGORIES.filter(cat => {
@@ -1963,32 +2377,60 @@
                 if (catMode === 'all') return true;
                 const cv = cur.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
                 const nv = nw.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
-                return cat.core || cv > 0 || nv > 0;
+                const cp = sumItemPremium(cur, cat.key);
+                const np = sumItemPremium(nw, cat.key);
+                return cat.core || cv > 0 || nv > 0 || cp > 0 || np > 0;
             });
             if (!grpCats.length) return;
 
-            html += `<div class="cmp-group-header">${escapeHtml(grp.label)}</div>`;
+            const grpCurPrem = sumGroupPremium(cur, grp.key, 'ALL');
+            const grpNwPrem  = sumGroupPremium(nw, grp.key, 'ALL');
+            const grpPremDiff = grpNwPrem - grpCurPrem;
+
+            html += `<div class="cmp-group-header flex items-center justify-between flex-wrap gap-2">
+                <span>${escapeHtml(grp.label)}</span>
+                <span class="text-[10px] font-mono font-normal text-slate-300">
+                    Pojistné bloku: <strong class="text-amber-300">${fmt(grpCurPrem)} Kč/měs</strong>
+                    → <strong class="text-sky-300">${fmt(grpNwPrem)} Kč/měs</strong>
+                    (${grpPremDiff === 0 ? '±0' : (grpPremDiff > 0 ? '+' : '') + fmt(grpPremDiff)} Kč/měs)
+                </span>
+            </div>`;
+
             grpCats.forEach(cat => {
                 const cv = cur.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
                 const nv = nw.reduce((s, c) => s + num(c.items && c.items[cat.key]), 0);
+                const cp = sumItemPremium(cur, cat.key);
+                const np = sumItemPremium(nw, cat.key);
+                totalCurItemPrem += cp;
+                totalNwItemPrem += np;
+
                 const diff = nv - cv;
+                const diffP = np - cp;
                 const cls = diff > 0 ? 'v-diff-pos' : diff < 0 ? 'v-diff-neg' : 'v-diff-zero';
+                const pDiffCls = diffP > 0 ? 'text-amber-300' : diffP < 0 ? 'text-emerald-400' : 'text-slate-500';
 
                 let verdict = '<span class="text-slate-600">Beze změny</span>';
                 if (cv === 0 && nv > 0) verdict = '<span class="badge badge-sky">★ Nově doplněno</span>';
+                else if (diff > 0 && diffP <= 0) verdict = '<span class="badge badge-emerald">▲ Vyšší PČ levněji</span>';
                 else if (diff > 0)      verdict = '<span class="badge badge-emerald">▲ Posíleno</span>';
                 else if (cv > 0 && nv === 0) verdict = '<span class="badge badge-amber">Odebráno</span>';
                 else if (diff < 0)      verdict = '<span class="badge badge-slate">Optimalizováno</span>';
+                else if (cv > 0 && diff === 0 && diffP < 0) verdict = '<span class="badge badge-emerald">✓ Stejná PČ levněji</span>';
                 else if (cv > 0 && diff === 0) verdict = '<span class="text-emerald-400 text-[11px]">● Zachováno</span>';
 
                 html += `<div class="cmp-row">
                     <div>
                         <div class="text-xs font-semibold text-slate-200">${escapeHtml(cat.label)}</div>
-                        <div class="text-[10px] text-slate-500">${escapeHtml(cat.help.slice(0, 95))}${cat.help.length > 95 ? '…' : ''}</div>
+                        <div class="text-[10px] text-slate-500">${escapeHtml(cat.help.slice(0, 90))}${cat.help.length > 90 ? '…' : ''}</div>
                     </div>
                     <div class="v v-curr">${fmtCatValue(cv, cat)}</div>
+                    <div class="v font-mono text-[11px] ${cp > 0 ? 'text-amber-300 font-semibold' : 'text-slate-600'}">${cp > 0 ? fmt(cp) + ' Kč' : '—'}</div>
                     <div class="v v-new">${fmtCatValue(nv, cat)}</div>
-                    <div class="v ${cls}">${diff === 0 ? '±0' : (diff > 0 ? '+' : '') + fmtCatValue(diff, cat)}</div>
+                    <div class="v font-mono text-[11px] ${np > 0 ? 'text-sky-300 font-semibold' : 'text-slate-600'}">${np > 0 ? fmt(np) + ' Kč' : '—'}</div>
+                    <div class="v ${cls}">
+                        <div>${diff === 0 ? '±0' : (diff > 0 ? '+' : '') + fmtCatValue(diff, cat)}</div>
+                        ${(cp > 0 || np > 0) ? `<div class="text-[10px] font-mono ${pDiffCls}">Poj.: ${diffP === 0 ? '±0' : (diffP > 0 ? '+' : '') + fmt(diffP)} Kč/měs</div>` : ''}
+                    </div>
                     <div class="text-right">${verdict}</div>
                 </div>`;
             });
@@ -1997,15 +2439,24 @@
         const curM = totalPremiumMonthly(cur);
         const newM = totalPremiumMonthly(nw);
         const diffPrem = newM - curM;
+        const diffItemPrem = totalNwItemPrem - totalCurItemPrem;
         const premCls = diffPrem > 0 ? 'v-diff-neg' : diffPrem < 0 ? 'v-diff-pos' : 'v-diff-zero';
 
         html += `
             <div class="cmp-row" style="background:#131e34 !important; border-top:2px solid #334155;">
-                <div class="text-xs font-bold text-slate-100">Měsíční pojistné celkem</div>
-                <div class="v v-curr font-bold">${fmtCZK(curM)}</div>
-                <div class="v v-new font-bold">${fmtCZK(newM)}</div>
-                <div class="v ${premCls} font-bold">${diffPrem === 0 ? '±0' : (diffPrem > 0 ? '+' : '') + fmtCZK(diffPrem)}</div>
-                <div class="text-right text-[11px] text-slate-400 font-mono">${ fmtCZK(newM * 12) } / rok</div>
+                <div class="text-xs font-bold text-slate-100">
+                    <div>Měsíční pojistné celkem</div>
+                    <div class="text-[10px] font-normal text-slate-400">Součet položek PČ a měsíčního pojistného</div>
+                </div>
+                <div class="v v-curr font-bold text-[11px] text-slate-400">Σ smluv: ${cur.length}</div>
+                <div class="v font-mono font-bold text-amber-300">${fmtCZK(curM)}<div class="text-[9px] font-normal text-slate-400">položky: ${fmt(totalCurItemPrem)} Kč</div></div>
+                <div class="v v-new font-bold text-[11px] text-slate-400">Σ smluv: ${nw.length}</div>
+                <div class="v font-mono font-bold text-sky-300">${fmtCZK(newM)}<div class="text-[9px] font-normal text-slate-400">položky: ${fmt(totalNwItemPrem)} Kč</div></div>
+                <div class="v ${premCls} font-bold">
+                    <div>${diffPrem === 0 ? '±0' : (diffPrem > 0 ? '+' : '') + fmtCZK(diffPrem)}</div>
+                    <div class="text-[10px] font-normal text-slate-400">Δ položek: ${diffItemPrem > 0 ? '+' : ''}${fmt(diffItemPrem)} Kč</div>
+                </div>
+                <div class="text-right text-[11px] text-slate-300 font-mono">${fmtCZK(newM * 12)} / rok</div>
             </div>
         `;
 
@@ -2333,6 +2784,1248 @@
             toast('Chyba parsování: ' + e.message, 'error');
         } finally {
             btn.disabled = false;
+        }
+    }
+
+    /* ════════════════════════════════════════════════════════════════════
+       NAHRÁNÍ DOKUMENTU SMLOUVY (PDF / SKEN / FOTKA / TEXT) & PARSER ČESKÝCH POJIŠŤOVEN
+       ════════════════════════════════════════════════════════════════════ */
+    let docUploadTarget = 'current';
+    let lastExtractedContract = null;
+    let lastUploadedImages = [];
+
+    function openDocUploadModal(which) {
+        docUploadTarget = which || 'current';
+        lastExtractedContract = null;
+        lastUploadedImages = [];
+        const titleEl = document.getElementById('docUploadModalTitle');
+        if (titleEl) {
+            titleEl.textContent = docUploadTarget === 'current'
+                ? 'Nahrát dokument platné smlouvy a automaticky vyplnit Stávající smlouvy'
+                : 'Nahrát dokument nabídky / modelace a automaticky vyplnit Návrh poradce';
+        }
+        const st = document.getElementById('docUploadStatus');
+        const prev = document.getElementById('docExtractedPreview');
+        const rawEl = document.getElementById('docRawTextInput');
+        const btnForm = document.getElementById('docOpenInFormBtn');
+        const btnSave = document.getElementById('docSaveDirectBtn');
+        const fInput = document.getElementById('docFileInput');
+        if (st) st.classList.add('hidden');
+        if (prev) { prev.classList.add('hidden'); prev.innerHTML = ''; }
+        if (rawEl) rawEl.value = '';
+        if (btnForm) btnForm.classList.add('hidden');
+        if (btnSave) btnSave.classList.add('hidden');
+        if (fInput) fInput.value = '';
+
+        const m = document.getElementById('docUploadModal');
+        if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+        if (window.lucide) lucide.createIcons();
+    }
+
+    function closeDocUploadModal() {
+        const m = document.getElementById('docUploadModal');
+        if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+    }
+
+    async function ensurePdfJs() {
+        if (window.pdfjsLib) {
+            if (!window.pdfjsLib.GlobalWorkerOptions.workerSrc) {
+                window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            }
+            return window.pdfjsLib;
+        }
+        return new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+            s.onload = () => {
+                if (window.pdfjsLib) {
+                    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                    resolve(window.pdfjsLib);
+                } else {
+                    reject(new Error('Knihovna PDF.js se nenačetla.'));
+                }
+            };
+            s.onerror = () => reject(new Error('Nelze načíst knihovnu PDF.js z CDN.'));
+            document.head.appendChild(s);
+        });
+    }
+
+    /* Extrakce textu z PDF se zachováním řádků tabulek dle souřadnic Y a X + případné vykreslení skenu */
+    async function extractTextFromPdfFile(file) {
+        const pdfjsLib = await ensurePdfJs();
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const pageTexts = [];
+        const renderedImages = [];
+
+        for (let pNum = 1; pNum <= pdf.numPages; pNum++) {
+            const page = await pdf.getPage(pNum);
+            const tc = await page.getTextContent();
+            const rowsMap = new Map();
+
+            (tc.items || []).forEach(it => {
+                const str = (it.str || '').trim();
+                if (!str) return;
+                const x = it.transform ? it.transform[4] : 0;
+                const y = it.transform ? it.transform[5] : 0;
+                /* Seskupíme položky na stejném řádku s tolerancí cca 3.5 pt */
+                let matchedY = null;
+                for (const ky of rowsMap.keys()) {
+                    if (Math.abs(ky - y) <= 3.5) { matchedY = ky; break; }
+                }
+                if (matchedY === null) {
+                    matchedY = y;
+                    rowsMap.set(matchedY, []);
+                }
+                rowsMap.get(matchedY).push({ x, str });
+            });
+
+            /* Seřadit řádky shora dolů (v PDF roste Y zdola nahoru) a položky v řádku zleva doprava */
+            const sortedY = Array.from(rowsMap.keys()).sort((a, b) => b - a);
+            const lines = sortedY.map(yKey => {
+                const items = rowsMap.get(yKey).sort((a, b) => a.x - b.x);
+                let lineStr = '';
+                let prevX = null;
+                items.forEach(item => {
+                    if (prevX !== null) {
+                        const gap = item.x - prevX;
+                        lineStr += gap > 28 ? '    ' : ' ';
+                    }
+                    lineStr += item.str;
+                    prevX = item.x + item.str.length * 4;
+                });
+                return lineStr.trim();
+            }).filter(Boolean);
+
+            pageTexts.push(lines.join('\n'));
+
+            /* Pokud má stránka velmi málo textu (naskenovaná smlouva) a jsme v prvních 3 stranách, vykreslíme ji pro OCR / Vision */
+            if (lines.join('').length < 40 && renderedImages.length < 3) {
+                const viewport = page.getViewport({ scale: 1.8 });
+                const canvas = document.createElement('canvas');
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                const ctx = canvas.getContext('2d');
+                await page.render({ canvasContext: ctx, viewport }).promise;
+                renderedImages.push(canvas.toDataURL('image/jpeg', 0.85));
+            }
+        }
+
+        return {
+            text: pageTexts.join('\n\n--- STRANA ---\n\n').trim(),
+            numPages: pdf.numPages,
+            images: renderedImages
+        };
+    }
+
+    function readFileAsDataUrl(file) {
+        return new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = e => resolve(e.target.result);
+            r.onerror = () => reject(new Error('Chyba čtení souboru.'));
+            r.readAsDataURL(file);
+        });
+    }
+
+    async function extractTextFromImageOrScan(dataUrls, statusCb) {
+        if (!dataUrls || !dataUrls.length) return '';
+        /* 1. Pokud je k dispozici Groq API klíč, využijeme rychlý Vision model pro přepis smlouvy */
+        const apiKey = getApiKey();
+        if (apiKey) {
+            try {
+                if (statusCb) statusCb('Čtu naskenovaný dokument pomocí AI Vision (Groq)…');
+                const contentArr = [
+                    { type: 'text', text: 'Přečti tuto českou pojistnou smlouvu / tabulku pojistky a vypiš kompletní text všech údajů přesně po řádcích: pojišťovna, produkt, číslo smlouvy, počátek a konec, pojištěné osoby, běžné pojistné a všechny řádky tabulky sjednaných pojistných rizik ve formátu: Název druhu pojištění | Tarif | Počátek | Konec | Pojistná částka (Kč) | Pojistné za položku (Kč).' }
+                ];
+                dataUrls.slice(0, 2).forEach(url => {
+                    contentArr.push({ type: 'image_url', image_url: { url } });
+                });
+                const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
+                    body: JSON.stringify({
+                        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+                        messages: [{ role: 'user', content: contentArr }],
+                        temperature: 0.1,
+                        max_tokens: 2500
+                    })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    const txt = data.choices?.[0]?.message?.content || '';
+                    if (txt.trim().length > 20) return txt;
+                }
+            } catch (e) {
+                console.warn('Groq Vision fallback to Tesseract:', e);
+            }
+        }
+
+        /* 2. Lokální OCR přes Tesseract.js (čeština) bez nutnosti API klíče */
+        if (statusCb) statusCb('Spouštím lokální české OCR rozpoznávání textu (Tesseract.js)…');
+        if (!window.Tesseract) {
+            await new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+                s.onload = resolve;
+                s.onerror = () => reject(new Error('Nelze načíst OCR knihovnu Tesseract.js.'));
+                document.head.appendChild(s);
+            });
+        }
+        let fullOcrText = '';
+        for (let i = 0; i < Math.min(dataUrls.length, 2); i++) {
+            if (statusCb) statusCb(`Rozpoznávám text ze skenu (strana ${i + 1})…`);
+            const res = await window.Tesseract.recognize(dataUrls[i], 'ces');
+            fullOcrText += (res?.data?.text || '') + '\n';
+        }
+        return fullOcrText.trim();
+    }
+
+    /* ─────────────────────────────────────────────────────────────────
+       EXPERTNÍ LOKÁLNÍ PARSER ČESKÝCH POJISTNÝCH SMLUV (VŠECH 13 POJIŠŤOVEN)
+       Rozpoznává strukturu pojistek, výročních dopisů a nabídek:
+       Allianz, ČPP, ČSOB, Generali ČP (vč. Domino Invest / Můj život), KB, Kooperativa,
+       Maxima, MetLife, NN, Pillow, Simplea, Uniqa, YOUPLUS.
+       ───────────────────────────────────────────────────────────────── */
+    function cleanCzechOcrText(rawText) {
+        let t = String(rawText || '')
+            .replace(/\u00A0/g, ' ')
+            .replace(/\r/g, '')
+            .replace(/[ \t]+/g, ' ');
+        /* Oprava OCR překlepů měny */
+        t = t.replace(/\b(\d+)\s*[Kk][eéEÉ]\b/g, '$1 Kč');
+        t = t.replace(/\b(\d+)\s*[Kk][cC]\b/g, '$1 Kč');
+        t = t.replace(/\b(\d+)\s*,-\s*(?:Kč)?/g, '$1 Kč');
+        /* Oprava častých OCR záměn písmen O a číslic 0 v kódech českých tarifů */
+        t = t.replace(/\bRPHKO\b/g, 'RPHK0')
+             .replace(/\bMZ6ZO\b/g, 'MZ6Z0')
+             .replace(/\bNDDBO\b/g, 'NDDB0')
+             .replace(/\bCHI2O\b/g, 'CHI20')
+             .replace(/\bTN82O\b/g, 'TN820')
+             .replace(/\bVZK2O\b/g, 'VZK20')
+             .replace(/\bSU2O\b/g, 'SU20')
+             .replace(/\bBON2O\b/g, 'BON20')
+             .replace(/\bDOZ2O\b/g, 'DOZ20')
+             .replace(/\bDO28O\b/g, 'DO280')
+             .replace(/\bRZ2OR\b/g, 'RZ20R')
+             .replace(/\bRK2OR\b/g, 'RK20R')
+             .replace(/\bPR2O1\b/g, 'PR201')
+             .replace(/\bRS2O1\b/g, 'RS201')
+             .replace(/\bIK32O\b/g, 'IK320')
+             .replace(/\bIK22O\b/g, 'IK220')
+             .replace(/\bRZP2O\b/g, 'RZP20');
+        return t;
+    }
+
+    function parseCzechPolicyText(rawText) {
+        const text = cleanCzechOcrText(rawText);
+        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+        const lower = text.toLowerCase();
+
+        const result = {
+            insurer: '',
+            productDetected: '',
+            contractNo: '',
+            clientId: state.clients[0]?.id || '',
+            clientName: '',
+            birthYear: null,
+            start: null,
+            end: null,
+            premium: 0,
+            paymentFrequency: 'monthly',
+            contractType: 'risk',
+            tnProgression: 800,
+            pnFromDay: 29,
+            pnRetroactive: false,
+            invPsychIncluded: true,
+            backPainIncluded: true,
+            employerContribution: 0,
+            taxDeductibleAnnual: 0,
+            items: Object.fromEntries(D.CATEGORIES.map(c => [c.key, 0])),
+            itemPremiums: Object.fromEntries(D.CATEGORIES.map(c => [c.key, 0])),
+            matchedSummary: [],
+            extractedRows: [],
+            note: ''
+        };
+
+        /* 1. Detekce pojišťovny a produktu (včetně kódů tarifů a historických řad) */
+        const insurerPatterns = [
+            { name: 'Kooperativa', rx: /kooperativa|pojišťovna\s+české\s+spořitelny|\bflexi\b|napřání|na\s+přání|perspektiva\s*7bn/i, prodRx: /(flexi\s*životní\s*pojištění|flexi\s*junior|flexi|napřání|perspektiva\s*7bn)/i },
+            { name: 'ČSOB Pojišťovna', rx: /čsob\s*pojišťovn|csob\s*pojistovn|\bčsob\b|\bnáš\s+život\b|\bforte\b|\bmaxík\b|\bkvarteto\b/i, prodRx: /(náš\s*život|forte|maxík|kvarteto|rytmus)/i },
+            { name: 'Generali Česká pojišťovna', rx: /generali\s*česká|česká\s*pojišťovna|generali\s*pojišťovna|domino\s*invest|\bmůj\s+život\b|\bsluníčko\b|\bbel\s+mondo\b|\bdiamant\b|\b(?:RZ20R|RZP20|RS201|RK20R|RK201|PR201|PR02B|VZK20|TN820|RPHK0|DOZ20|DO280|CHI20|RIDI0|MZ6Z0|NDDB0|IK320|IK32B|IK220|BON20)\b/i, prodRx: /(domino\s*invest\s*2020|domino\s*invest|můj\s*život\s*2|můj\s*život|sluníčko|bel\s*mondo|diamant|dynamik)/i },
+            { name: 'Allianz', rx: /\ballianz\b/i, prodRx: /(allianz\s*život|allianz\s*plus|rytmus|mercury)/i },
+            { name: 'Uniqa', rx: /\buniqa\b|\baxa\s+životní|\baxa\b|život\s*[&a]\s*radost|domino\s*risk|\bržp-d\b|activelife/i, prodRx: /(život\s*[&a]\s*radost|domino\s*risk|ržp-d|activelife)/i },
+            { name: 'NN Životní pojišťovna', rx: /\bnn\s+životní|\bnn\s+orange|\borange\s+risk\b|\bing\s+životní|\baegon\b|\bproaktiv\b/i, prodRx: /(nn\s*orange\s*risk|orange\s*risk|nn\s*život|proaktiv|smart)/i },
+            { name: 'Česká podnikatelská pojišťovna', rx: /česká\s+podnikatelská|\bčpp\b|\bneon\s+risk|\bneon\s+life|\bneon\b|\bevoluce\b/i, prodRx: /(neon\s*risk|neon\s*life|neon|evoluce)/i },
+            { name: 'MetLife', rx: /\bmetlife\b|\bamcico\b|\boneguard\b|\bgarde\b|\bfairlife\b|\bkamarád\b/i, prodRx: /(oneguard|garde\s*6\.0|garde|fairlife|kamarád|onelife)/i },
+            { name: 'Komerční pojišťovna', rx: /komerční\s+pojišťovn|\bkb\s+pojišťovn|mojejistota|moje\s+jistota|vital\s+invest|\bmutumutu\b|\belán\b/i, prodRx: /(mojejistota|moje\s*jistota|vital\s*invest|mutumutu|elán)/i },
+            { name: 'Simplea', rx: /\bsimplea\b/i, prodRx: /(simplea\s*životní\s*pojištění|simplea)/i },
+            { name: 'Pillow pojišťovna', rx: /\bpillow\b/i, prodRx: /(pillow\s*život|pillow\s*úraz\s*a\s*nemoc|pillow)/i },
+            { name: 'YOUPLUS', rx: /\byouplus\b|\byou\s+plus\b|\b4u\s+životní/i, prodRx: /(4u\s*životní\s*pojištění|4u)/i },
+            { name: 'Maxima / Direct', rx: /\bmaxima\b|\bmaxefekt\b|\bdirect\s+pojišťovn|\bdirect\s+život/i, prodRx: /(maxefekt|direct\s*život)/i }
+        ];
+
+        for (const ip of insurerPatterns) {
+            if (ip.rx.test(text)) {
+                result.insurer = ip.name;
+                const pm = text.match(ip.prodRx);
+                if (pm) result.productDetected = pm[1];
+                else if (ip.name === 'Generali Česká pojišťovna') {
+                    if (/domino\s*invest/i.test(text)) result.productDetected = 'Domino Invest 2020';
+                    else if (/\b(?:RZ20R|RK20R|PR201|VZK20|TN820|RPHK0|DOZ20|RIDI0)\b/i.test(text)) result.productDetected = 'Můj život 2';
+                }
+                const insMeta = D.INSURERS.find(i => i.name === ip.name);
+                if (insMeta && insMeta.defaultConditions) {
+                    result.tnProgression = insMeta.defaultConditions.tnProgression || 800;
+                    result.pnRetroactive = !!insMeta.defaultConditions.pnRetroactive;
+                    result.invPsychIncluded = insMeta.defaultConditions.invPsychIncluded !== false;
+                    result.backPainIncluded = !!insMeta.defaultConditions.backPainIncluded;
+                }
+                break;
+            }
+        }
+
+        /* 2. Typ smlouvy (RŽP / IŽP / KŽP / Úrazové) */
+        if (/investiční\s+životní|\bižp\b|domino\s*invest|alokace\s+pojistného|podílové\s+jednotky|perspektiva\s*7bn|vital\s*invest|\bforte\b|\brytmus\b/i.test(text)) {
+            result.contractType = 'invest';
+        } else if (/kapitálové\s+životní|\bkžp\b|pro\s+případ\s+smrti\s+nebo\s+dožití|pojistná\s+částka\s+na\s+dožití/i.test(text)) {
+            result.contractType = 'capital';
+        } else if (/úrazové\s+pojištění/i.test(text) && !/smrt\s+z\s+jakýchkoliv|invalidit/i.test(text)) {
+            result.contractType = 'accident';
+        } else {
+            result.contractType = 'risk';
+        }
+
+        /* 3. Číslo smlouvy */
+        const cnoMatch = text.match(/(?:číslo\s*(?:pojistné\s*)?smlouvy|pojistná\s*smlouva\s*č\.?|pojistka\s*k\s*pojistné\s*smlouvě\s*č\.?|pojistka\s*č\.?|smlouva\s*č\.?|č\.\s*smlouvy|č\.\s*ps|návrh\s*(?:pojistné\s*smlouvy\s*)?č\.?|variabilní\s*symbol)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\/-]{4,18})/i);
+        if (cnoMatch) {
+            result.contractNo = cnoMatch[1].trim();
+        } else {
+            const fallbackNo = text.match(/\b(\d{8,12})\b/);
+            if (fallbackNo && !['47116617', '26185610', '45272956', '61859869', '27699781', '49240787'].includes(fallbackNo[1])) {
+                result.contractNo = fallbackNo[1];
+            }
+        }
+
+        /* 4. Počátek a konec pojištění (z hlavičky nebo z dat v tabulce DD.MM.RRRR) */
+        const startMatch = text.match(/(?:počátek\s+pojištění|datum\s+počátku|sjednáno\s+(?:od|dne)|platnost\s+od|pojištění\s+od)\s*[:.-]?\s*(?:\d{1,2}\.\s*\d{1,2}\.\s*)?(19\d{2}|20\d{2})/i);
+        if (startMatch) result.start = parseInt(startMatch[1], 10);
+
+        const endMatch = text.match(/(?:konec\s+pojištění|datum\s+konce|sjednáno\s+do|platnost\s+do|pojištění\s+do|výroční\s+den\s+konce)\s*[:.-]?\s*(?:\d{1,2}\.\s*\d{1,2}\.\s*)?(20[2-9]\d)/i);
+        if (endMatch) result.end = parseInt(endMatch[1], 10);
+
+        if (!result.start || !result.end) {
+            const rangeMatch = text.match(/\b(19\d{2}|20[0-2]\d)\s*[–-]\s*(20[2-8]\d)\b/);
+            if (rangeMatch) {
+                if (!result.start) result.start = parseInt(rangeMatch[1], 10);
+                if (!result.end)   result.end   = parseInt(rangeMatch[2], 10);
+            }
+        }
+        if (!result.start || !result.end) {
+            const datePairs = [...text.matchAll(/\b\d{1,2}\.\s*\d{1,2}\.\s*(19\d{2}|20[0-3]\d)\b[\s|]+\b\d{1,2}\.\s*\d{1,2}\.\s*(20[2-9]\d)\b/g)];
+            if (datePairs.length) {
+                const starts = datePairs.map(m => parseInt(m[1], 10)).filter(Boolean);
+                const ends   = datePairs.map(m => parseInt(m[2], 10)).filter(Boolean);
+                if (!result.start && starts.length) result.start = Math.min(...starts);
+                if (!result.end && ends.length)     result.end   = Math.max(...ends);
+            }
+        }
+
+        /* 5. Pojištěná osoba — spárování s klienty v aplikaci */
+        for (const cl of (state.clients || [])) {
+            if (!cl.name) continue;
+            const parts = cl.name.trim().split(/\s+/).filter(p => p.length >= 3);
+            if (parts.length && parts.every(p => lower.includes(p.toLowerCase()))) {
+                result.clientId = cl.id;
+                result.clientName = cl.name;
+                break;
+            }
+        }
+        if (!result.clientName) {
+            const nameMatch = text.match(/(?:pojištěn(?:ý|á|á\s+osoba)(?:\s*č\.\s*1)?|1\.\s*pojištěný|hlavní\s+pojištěný|jméno\s+a\s+příjmení)\s*[:.-]?\s*([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ][a-záčďéěíňóřšťúůýž]+(?:\s+[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ][a-záčďéěíňóřšťúůýž]+){1,2})/);
+            if (nameMatch) {
+                result.clientName = nameMatch[1].trim();
+                const foundCl = (state.clients || []).find(c =>
+                    c.name && (c.name.toLowerCase().includes(result.clientName.toLowerCase()) || result.clientName.toLowerCase().includes(c.name.toLowerCase()))
+                );
+                if (foundCl) result.clientId = foundCl.id;
+            }
+        }
+
+        /* 6. Frekvence platby a celkové běžné pojistné */
+        if (/frekvence\s+placení\s*[:.-]?\s*roční|roční\s+pojistné|platba\s+ročně/i.test(text) && !/měsíční\s+pojistné/i.test(text)) {
+            result.paymentFrequency = 'yearly';
+        } else if (/frekvence\s+placení\s*[:.-]?\s*čtvrtletní|čtvrtletní\s+pojistné/i.test(text)) {
+            result.paymentFrequency = 'quarterly';
+        }
+
+        const premRegexes = [
+            /(?:pojistné\s*\([^\)]*\)\s*celkem|celkové\s+(?:běžné\s+)?(?:měsíční\s+)?pojistné|běžné\s+(?:měsíční\s+)?pojistné(?:\s+celkem)?|měsíční\s+pojistné(?:\s+celkem)?|pojistné\s+celkem(?:\s+za\s+smlouvu)?|celkem\s+k\s+úhradě|platba\s+celkem)\s*[:.-]?\s*(\d{1,3}(?:[\s.]\d{3})*(?:[.,]\d{1,2})?)\s*(?:kč|czk|,-)/i,
+            /(\d{1,3}(?:[\s.]\d{3})*),-\s*kč\s*(?:[\r\n\s]*způsob\s+placení)/i,
+            /(?:pojistné)\s*[:.-]?\s*(\d{1,3}(?:\s?\d{3})?)\s*kč\s*\/\s*měs/i
+        ];
+        for (const prx of premRegexes) {
+            const pm = text.match(prx);
+            if (pm) {
+                const val = parseFloat(pm[1].replace(/\s|\./g, '').replace(',', '.'));
+                if (val >= 50 && val <= 150000) {
+                    result.premium = Math.round(val);
+                    break;
+                }
+            }
+        }
+
+        /* 7. Specifické podmínky smlouvy */
+        if (/\bprog\s*10\b/i.test(text)) {
+            result.tnProgression = 1000;
+        } else if (/\bprog\s*8\b/i.test(text)) {
+            result.tnProgression = 800;
+        } else {
+            const progMatch = text.match(/progres(?:e|ivní\s+plnění)\s*(?:až\s*)?(\d{3,4})\s*%|(\d{1,2})\s*násobn(?:á|é)\s+progres/i);
+            if (progMatch) {
+                const pVal = progMatch[1] ? parseInt(progMatch[1], 10) : parseInt(progMatch[2], 10) * 100;
+                if ([100, 400, 500, 600, 800, 1000].includes(pVal)) result.tnProgression = pVal;
+            }
+        }
+        if (/zpětně\s+od\s+1\.\s*dne|se\s+zpětným\s+plněním\s+od\s+1\.\s*dne|zpětné\s+plnění|zpětně/i.test(text)) {
+            result.pnRetroactive = true;
+        }
+
+        /* 8. Pomocná funkce pro vytažení (Pojistná částka, Pojistné za položku) */
+        function extractAmountAndPremiumFromRow(rowText, kind) {
+            let clean = rowText
+                .replace(/\b\d{1,2}\.\s*\d{1,2}\.\s*\d{2,4}\b/g, ' ')
+                .replace(/\b(19\d{2}|20[0-8]\d)\s*[–-]\s*(20[0-9]\d)\b/g, ' ')
+                .replace(/(?:od|do|rok\w*)\s+(19\d{2}|20[0-9]\d)\b/gi, ' ')
+                .replace(/\d+(?:[.,]\d+)?\s*%/g, ' ')
+                .replace(/(?:od|po)\s*\d+(?:[.,]\d+)?\s*\.?\s*(?:dne|dnů|dní|dnech|týdne|měsíce)/gi, ' ')
+                .replace(/do\s*\d+\s*let/gi, ' ')
+                .replace(/\b[1234]\.\s*stup\w*/gi, ' ')
+                .replace(/\b\d+\s*x\b/gi, ' ')
+                .replace(/\bprog\s*\d+\b/gi, ' ')
+                .replace(/\b[A-Z]{2,5}\d{1,3}[A-Z0-9]?\b/g, ' ');
+
+            let amount = 0;
+            let itemPrem = 0;
+
+            const kcTokens = [...clean.matchAll(/(\d{1,3}(?:[\s.]\d{3})+|\d{1,7})\s*(?:kč|czk|,-)?(?:\s*\/\s*(?:den|měs\w*))?/gi)];
+            if (kcTokens.length >= 2) {
+                const kcVals = kcTokens.map(m => parseInt(m[1].replace(/[\s.]/g, ''), 10)).filter(n => !isNaN(n) && n > 0);
+                if (kcVals.length >= 2) {
+                    const firstVal = kcVals[0];
+                    const lastVal  = kcVals[kcVals.length - 1];
+                    if (kind === 'sum' && firstVal >= 5000) {
+                        amount = firstVal;
+                        if (lastVal < firstVal && lastVal <= 25000) itemPrem = lastVal;
+                        return { amount, itemPrem };
+                    }
+                    if ((kind === 'daily' || kind === 'monthly') && firstVal >= 30) {
+                        amount = firstVal;
+                        if (lastVal <= 15000) itemPrem = lastVal;
+                        return { amount, itemPrem };
+                    }
+                }
+            }
+
+            const milMatch = clean.match(/(\d+(?:[.,]\d+)?)\s*mil\.?(?:\s*kč)?/i);
+            if (milMatch && kind === 'sum') {
+                amount = Math.round(parseFloat(milMatch[1].replace(',', '.')) * 1000000);
+            }
+            const tisMatch = !amount && clean.match(/(\d+(?:[.,]\d+)?)\s*tis\.?(?:\s*kč)?/i);
+            if (tisMatch && kind === 'sum') {
+                amount = Math.round(parseFloat(tisMatch[1].replace(',', '.')) * 1000);
+            }
+
+            const numMatches = [...clean.matchAll(/\b(\d{1,3}(?:[\s.]\d{3})+|\d{1,7})(?:[.,]\d{1,2})?\b/g)];
+            const nums = numMatches.map(m => parseInt(m[1].replace(/[\s.]/g, ''), 10)).filter(n => !isNaN(n) && n > 0);
+            const filtered = nums.filter(n => !(n >= 1980 && n <= 2070 && nums.length > 1));
+
+            if (!filtered.length) return { amount, itemPrem };
+
+            if (kind === 'sum') {
+                if (!amount) {
+                    const big = filtered.filter(n => n >= 5000);
+                    amount = big.length ? big[0] : 0;
+                }
+                const afterAmount = filtered.filter(n => n !== amount && n >= 1 && n <= 15000);
+                if (afterAmount.length) itemPrem = afterAmount[afterAmount.length - 1];
+                return { amount, itemPrem };
+            }
+            if (kind === 'daily') {
+                const cands = filtered.filter(n => n >= 40 && n <= 15000);
+                if (cands.length) {
+                    amount = cands[0];
+                    if (cands.length >= 2 && cands[cands.length - 1] <= 5000) {
+                        itemPrem = cands[cands.length - 1];
+                    } else if (filtered.length >= 2 && filtered[filtered.length - 1] < amount) {
+                        itemPrem = filtered[filtered.length - 1];
+                    }
+                }
+                return { amount, itemPrem };
+            }
+            if (kind === 'monthly') {
+                const cands = filtered.filter(n => n >= 150 && n <= 150000);
+                if (cands.length) {
+                    amount = cands[0];
+                    const rem = filtered.filter(n => n !== amount && n >= 1 && n <= 10000);
+                    if (rem.length) itemPrem = rem[rem.length - 1];
+                }
+                return { amount, itemPrem };
+            }
+            return { amount, itemPrem };
+        }
+
+        /* 9. Spojení víceřádkových popisů rizik do jednoho logického řádku */
+        const hasMoneyOrDate = (s) => /\d{1,3}(?:[\s.]\d{3})+\s*(?:kč|czk|,-)|\b\d+\s*(?:kč|czk|,-)\b|\b\d{1,2}\.\s*\d{1,2}\.\s*\d{4}\b/i.test(s);
+        const isContinuationLine = (s) => {
+            if (!s || s.length > 95) return false;
+            if (hasMoneyOrDate(s)) return false;
+            return /^(?:s\s+ročně\s+klesající|s\s+klesající|s\s+konstantní|invalidity\s+třetího|invalidity\s+druhého|stupně\s+s\s+klesající|dopravní\s+nehody|od\s+0[.,]5\s*%|od\s+10\s*%|zpětně|nezpětně|po\s+\d+\s+dnech|fixace\s+\d+\s*%|a\s+výplatou|s\s+navýšením)/i.test(s);
+        };
+
+        const logicalLines = [];
+        for (let i = 0; i < lines.length; i++) {
+            let curr = lines[i];
+            while (i + 1 < lines.length && isContinuationLine(lines[i + 1])) {
+                curr += ' ' + lines[i + 1];
+                i++;
+            }
+            logicalLines.push(curr);
+        }
+
+        /* 10. Pravidla pro rozpoznání všech 34 pojistných kategorií a kódů tarifů */
+        const categoryRules = [
+            /* Kombinovaný tarif Smrt nebo Invalidita I/II/III s klesající PČ (např. Generali PR201 / PR02B) */
+            { key: '__COMBO_SMRT_INV_KLES__', tariff: 'PR201 / PR02B', rx: /\b(?:PR201|PR02B)\b|prvního\s+z\s+rizik\s+smrti\s+nebo\s+invalidity/i },
+
+            /* SMRT A DOŽITÍ */
+            { key: 'dozitiInvestice', tariff: 'RZP20 / BON20', rx: /\b(?:RZP20|BON20)\b|smrt\s+nebo\s+dožití|věrnostní\s+bonus|podílov\w*\s+jednotk\w*|dožití/i },
+            { key: 'smrtAutonehoda', tariff: 'SA', rx: /smrt.*(?:dopravní\s+nehod|autonehod)(?!.*2x\s+pojistné\s+plnění)|úrazová\s+smrt\s+při\s+dopravní/i },
+            { key: 'smrtUraz', tariff: 'SU20', rx: /\bSU20\b|smrt\s+(?:následkem\s+úrazu|úrazem|způsobená\s+úrazem)|úrazové\s+úmrtí|\bsmú\b|\bsmu\b|\bsmur\b/i },
+            { key: 'smrtKles', tariff: 'RK20R / RK201', rx: /\b(?:RK20R|RK201)\b|(?:smrt|úmrtí).*(?:ročně\s+klesající|klesající|lineárně|anuitně|k\s+úvěru|hypoték)|\bsmk\b|\bsmtk\b/i },
+            { key: 'rentaPozustali', tariff: 'RP', rx: /pozůstalostní\s+(?:renta|důchod)|renta\s+pro\s+pozůstalé|důchod\s+pro\s+pozůstalé/i },
+            { key: 'smrt', tariff: 'RZ20R / RS201', rx: /\b(?:RZ20R|RS201)\b|(?:základní\s+|hlavní\s+|doplňkové\s+)?(?:pojištění\s+(?:pro\s+případ\s+)?)?(?:smrt(?:i)?|úmrtí)(?!\s*(?:úrazem|následkem\s+úrazu|při\s+dopravní|s?\s*ročně\s*klesající|s?\s*klesající|nebo\s+dožití))/i },
+
+            /* INVALIDITA A LTC */
+            { key: 'dlouhodobaPece', tariff: 'LTC', rx: /dlouhodobá\s+péče|nesoběstačnost|ztráta\s+soběstačnosti|závislost\s+na\s+péči|\bltc\b|bezmocnost/i },
+            { key: 'zprosteni', tariff: 'ZPR', rx: /zproštění\s+od\s+placení/i },
+            { key: 'invRenta', tariff: 'INVR', rx: /invalidní\s+(?:renta|důchod)|renta\s+při\s+invaliditě|důchod\s+při\s+invaliditě/i },
+            { key: 'inv2Kles', tariff: 'IK220', rx: /\bIK220\b|invalidit\w*\s*(?:2\.|ii\.|druhého).*(?:klesající|fixace)/i },
+            { key: 'invKles', tariff: 'IK320 / IK32B', rx: /\b(?:IK320|IK32B)\b|invalidit\w*\s*(?:3\.|iii\.|třetího).*(?:klesající|fixace)|invalidit\w*.*(?:ročně\s+klesající|klesající|k\s+úvěru)|\bidk\b|\binvk\b/i },
+            { key: 'invalidita', tariff: 'INV3', rx: /invalidit\w*\s*(?:3\.|iii\.|třetího|i\.\s*[–+-]\s*iii\.|1\.\s*[–+-]\s*3\.|1\.,\s*2\.\s*a\s*3\.)(?!.*klesající)|\binv\s*3\b|\bid\s*3\b/i },
+            { key: 'inv2', tariff: 'INV2', rx: /invalidit\w*\s*(?:2\.|ii\.|druhého|ii\.\s*a\s*iii\.|2\.\s*a\s*3\.)(?!.*klesající)|\binv\s*2\b|\bid\s*2\b/i },
+            { key: 'inv1', tariff: 'INV1', rx: /invalidit\w*\s*(?:1\.|i\.(?!\s*i)|prvního)(?!.*klesající)|\binv\s*1\b|\bid\s*1\b/i },
+
+            /* ZÁVAŽNÁ ONEMOCNĚNÍ */
+            { key: 'zavOnKles', tariff: 'VZK20', rx: /\bVZK20\b|(?:závažn\w+|vážn\w+)\s+(?:onemocnění|nemoc\w*).*(?:klesající|lineárně|anuitně)|\bzok\b|\bznk\b/i },
+            { key: 'zavOnMuzZena', tariff: 'ZO Onko+', rx: /(?:rakovin\w+|onkolog\w+|karcinom|závažn\w+\s+onemocnění\s+pro\s+(?:ženy|muže)|pro\s+něj|pro\s+ni|in\s*situ)/i },
+            { key: 'cukrovkaKompl', tariff: 'Dia', rx: /cukrovk\w+|diabetes/i },
+            { key: 'trvaleNasledkyNemoc', tariff: 'TNN', rx: /trvalé\s+následky\s+nemoci|snížená\s+soběstačnost\s+dítěte|dětská\s+invalidita/i },
+            { key: 'zavOn', tariff: 'ZO', rx: /(?:závažn\w+|vážn\w+)\s+(?:onemocnění|nemoc\w+|chorob\w+)(?!.*klesající)|\bddz?\b|\bzavo\b/i },
+
+            /* ÚRAZ A TRVALÉ NÁSLEDKY */
+            { key: 'tnUraz10', tariff: 'TN100', rx: /\bTN100\b|trvalé\s+následky\s+úrazu.*od\s*10\s*%|\btnu?\s*10\b|\btn\s*od\s*10\b/i },
+            { key: 'tnUraz', tariff: 'TN820', rx: /\bTN820\b|trvalé\s+následky\s+úrazu(?!.*od\s*10\s*%)|\btnu\b|\btn01\b/i },
+            { key: 'urazVelky', tariff: 'DO280', rx: /\bDO280\b|(?:vážný\s+úraz|denní\s+odškodné.*(?:od\s*2[89]\.\s*dne|nad\s*2[89]\s*dn))/i },
+            { key: 'uraz', tariff: 'DOZ20', rx: /\bDOZ20\b|denní\s+odškodné(?:\s+za\s+(?:úraz|dobu\s+(?:nezbytného\s+)?léčení))?(?:\s+úrazu)?(?!.*od\s*2[89]\.\s*dne)|tělesné\s+poškození\s+(?:způsobené\s+)?úrazem|\bdoú\b|\bdou\d?\b/i },
+            { key: 'zlomeninyPopaleniny', tariff: 'Zlom', rx: /zlomenin\w*|popálenin\w*/i },
+            { key: 'horniKoncetiny', tariff: 'RPHK0', rx: /\bRPHK0\b|horní\w*\s+končetin\w*|poškození\s+rukou/i },
+
+            /* PRACOVNÍ NESCHOPNOST, OČR A HOSPITALIZACE */
+            { key: 'pn15', tariff: 'PN15', rx: /prac\w*\s+neschopnost.*(?:od|po)\s*1[45]\.?\s*dn|\bpn\s*15\b/i },
+            { key: 'pn61', tariff: 'MZ6Z0', rx: /\bMZ6Z0\b|prac\w*\s+neschopnost.*(?:od|po)\s*6[01]\.?\s*dn|měsíční\s+dávka.*prac\w*\s+neschopnost|\bpn\s*6[01]\b/i },
+            { key: 'pn28', tariff: 'Z29Z0', rx: /\bZ29Z0\b|prac\w*\s+neschopnost|denní\s+dávka\s+při\s+prac\w*\s+neschopnosti|\bpn\s*2[89]\b|\bpuv\b/i },
+            { key: 'osetrovani', tariff: 'OČR', rx: /ošetřování\s+(?:člena\s+rodiny|dítěte)|\bočr\b|\boset\b/i },
+            { key: 'hospUraz', tariff: 'HÚ', rx: /(?:hospitalizace|pobyt\s+v\s+nemocnici).*(?:pouze\s+úraz|následkem\s+úrazu|úrazem)/i },
+            { key: 'hosp', tariff: 'NDDB0', rx: /\bNDDB0\b|hospitalizac\w*|pobyt\s+v\s+nemocnici|nemocniční\s+denní\s+dávk\w*/i },
+
+            /* DOPLŇKY A CHIRURGIE */
+            { key: 'ztrataRidicskeho', tariff: 'RIDI0', rx: /\bRIDI0\b|ztráta\s+řidičského\s+oprávnění/i },
+            { key: 'chir', tariff: 'CHI20', rx: /\bCHI20\b|chirurgick\w+\s+zákrok\w*|operac\w*/i },
+            { key: 'rekonvalescence', tariff: 'Reh', rx: /rekonvalescenc\w*|poúrazová\s+péče|rehabilitac\w*|cesta\s+ke\s+zdraví/i },
+            { key: 'odpovednostObc', tariff: 'Odp', rx: /občanská\s+odpovědnost|odpovědnost\s+v\s+běžném\s+občanském\s+životě|odpovědnost\s+za\s+škodu/i }
+        ];
+
+        for (let i = 0; i < logicalLines.length; i++) {
+            const line = logicalLines[i];
+            if (line.length > 270) continue;
+
+            for (const rule of categoryRules) {
+                if (rule.rx.test(line)) {
+                    /* Detekce explicitního tarifního kódu na řádku */
+                    const tCodeMatch = line.match(/\b(RZ20R|RZP20|RS201|RK20R|RK201|PR201|PR02B|VZK20|TN820|RPHK0|DOZ20|DO280|CHI20|RIDI0|MZ6Z0|NDDB0|IK320|IK32B|IK220|BON20|Z29Z0)\b/i);
+                    const detectedTariff = tCodeMatch ? tCodeMatch[1].toUpperCase() : (rule.tariff || '');
+
+                    /* Speciální hypoteční tarif PR201 / PR02B */
+                    if (rule.key === '__COMBO_SMRT_INV_KLES__') {
+                        const { amount, itemPrem } = extractAmountAndPremiumFromRow(line, 'sum');
+                        if (amount > 0) {
+                            result.items.smrtKles = Math.max(result.items.smrtKles || 0, amount);
+                            result.items.invKles  = Math.max(result.items.invKles || 0, amount);
+                            if (itemPrem > 0) result.itemPremiums.invKles = (result.itemPremiums.invKles || 0) + itemPrem;
+                            result.extractedRows.push({
+                                id: 'er_' + Math.random().toString(36).substr(2, 7),
+                                tariff: detectedTariff,
+                                rawTitle: 'První z rizik smrti nebo invalidity klesající',
+                                categoryKey: '__COMBO_SMRT_INV_KLES__',
+                                amount: amount,
+                                itemPrem: itemPrem,
+                                unit: 'Kč'
+                            });
+                        }
+                        break;
+                    }
+
+                    const cat = D.CATEGORY_BY_KEY[rule.key];
+                    if (!cat) continue;
+                    let { amount, itemPrem } = extractAmountAndPremiumFromRow(line, cat.kind);
+
+                    /* Pokud je částka na bezprostředně následujícím řádku */
+                    if (!amount && i + 1 < logicalLines.length && logicalLines[i + 1].length < 70 && !/[a-záčďéěíňóřšťúůýž]{6,}/i.test(logicalLines[i + 1].replace(/kč|czk|den|měs/gi, ''))) {
+                        const nextExtracted = extractAmountAndPremiumFromRow(logicalLines[i + 1], cat.kind);
+                        amount = nextExtracted.amount;
+                        if (!itemPrem) itemPrem = nextExtracted.itemPrem;
+                    }
+
+                    if (amount > 0) {
+                        let displayUnit = cat.kind === 'daily' ? 'Kč/den' : cat.kind === 'monthly' ? 'Kč/měs' : 'Kč';
+                        let displayAmount = amount;
+
+                        /* Pokud jde o "Měsíční dávku při prac. neschopnosti" (MZ6Z0 = např. 10 000 Kč/měs), převedeme na denní dávku pro aplikaci */
+                        if ((rule.key === 'pn61' || rule.key === 'pn28') && (/měsíční\s+dávka|\bMZ6Z0\b/i.test(line) || amount >= 2500)) {
+                            displayUnit = 'Kč/měs';
+                            amount = Math.round(amount / 30);
+                        }
+
+                        if (rule.key === 'smrtUraz' && /2\s*x.*dopravní\s+nehod/i.test(line)) {
+                            result.items.smrtAutonehoda = Math.max(result.items.smrtAutonehoda || 0, amount);
+                        }
+
+                        if (rule.key === 'invalidita' && /(?:i\.\s*[–+-]\s*iii\.|1\.\s*[–+-]\s*3\.|1\.,\s*2\.\s*a\s*3\.|i\.,\s*ii\.\s*a\s*iii\.)/i.test(line)) {
+                            result.items.invalidita = Math.max(result.items.invalidita, amount);
+                            result.items.inv2 = Math.max(result.items.inv2, amount);
+                            result.items.inv1 = Math.max(result.items.inv1, amount);
+                            if (itemPrem > 0) result.itemPremiums.invalidita = (result.itemPremiums.invalidita || 0) + itemPrem;
+                        } else {
+                            result.items[rule.key] = (result.items[rule.key] || 0) + amount;
+                            if (itemPrem > 0) {
+                                result.itemPremiums[rule.key] = (result.itemPremiums[rule.key] || 0) + itemPrem;
+                            }
+                        }
+
+                        /* Záznam do interaktivního kontrolního seznamu pro uživatele */
+                        const shortTitle = line.length > 70 ? line.slice(0, 68) + '…' : line;
+                        result.extractedRows.push({
+                            id: 'er_' + Math.random().toString(36).substr(2, 7),
+                            tariff: detectedTariff,
+                            rawTitle: shortTitle,
+                            categoryKey: rule.key,
+                            amount: displayAmount,
+                            itemPrem: itemPrem,
+                            unit: displayUnit
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (result.items.pn15 > 0) result.pnFromDay = 15;
+        else if (result.items.pn28 > 0) result.pnFromDay = 29;
+        else if (result.items.pn61 > 0) result.pnFromDay = 61;
+
+        /* Součet vytěženého pojistného položek */
+        const sumExtractedItemPrems = Object.values(result.itemPremiums).reduce((s, v) => s + num(v), 0);
+        if (result.premium === 0 && sumExtractedItemPrems > 0) {
+            result.premium = sumExtractedItemPrems;
+        } else if (sumExtractedItemPrems === 0 && result.premium > 0 && D.estimateItemPremiums) {
+            result.itemPremiums = D.estimateItemPremiums(result.items, result.premium);
+        }
+
+        /* Souhrn nalezených rizik */
+        D.CATEGORIES.forEach(cat => {
+            const v = num(result.items[cat.key]);
+            const pv = num(result.itemPremiums[cat.key]);
+            if (v > 0 || pv > 0) {
+                result.matchedSummary.push({
+                    key: cat.key,
+                    label: cat.label,
+                    val: v,
+                    prem: pv,
+                    formatted: fmtCatValue(v, cat),
+                    formattedPrem: pv > 0 ? `${fmt(pv)} Kč/měs` : '—'
+                });
+            }
+        });
+
+        const noteParts = [];
+        if (result.productDetected) noteParts.push(`Produkt: ${result.productDetected}`);
+        if (result.clientName) noteParts.push(`Pojištěný: ${result.clientName}`);
+        noteParts.push('Vytěženo lokálním parserem');
+        result.note = noteParts.join(' · ');
+
+        return result;
+    }
+
+    /* Pomocný generátor options pro dropdown výběr kategorie v kontrolní tabulce OCR */
+    function buildCategorySelectOptions(selectedKey) {
+        let html = `<option value="IGNORE" ${selectedKey === 'IGNORE' ? 'selected' : ''}>-- Ignorovat položku (nezařazovat) --</option>`;
+        html += `<option value="__COMBO_SMRT_INV_KLES__" ${selectedKey === '__COMBO_SMRT_INV_KLES__' ? 'selected' : ''}>⚡ Hypoteční balíček: Smrt i Invalidita klesající (PR201 / PR02B)</option>`;
+
+        D.CATEGORY_GROUPS.forEach(grp => {
+            const cats = D.CATEGORIES.filter(c => c.group === grp.key);
+            html += `<optgroup label="${escapeHtml(grp.label)}">`;
+            cats.forEach(c => {
+                const u = c.kind === 'daily' ? 'Kč/den' : c.kind === 'monthly' ? 'Kč/měs' : 'Kč';
+                html += `<option value="${c.key}" ${c.key === selectedKey ? 'selected' : ''}>${escapeHtml(c.label)} (${u})</option>`;
+            });
+            html += `</optgroup>`;
+        });
+        return html;
+    }
+
+    /* Vykreslení řádků interaktivní kontrolní tabulky OCR */
+    function renderExtractedRowsHtml(parsed) {
+        if (!parsed.extractedRows || !parsed.extractedRows.length) {
+            return `<tr><td colspan="5" class="p-3 text-center text-xs text-amber-300">V dokumentu nebyly automaticky detekovány konkrétní řádky tabulky krytí. Můžete kliknout na „+ Přidat položku ze smlouvy“ a zadat krytí ručně.</td></tr>`;
+        }
+        return parsed.extractedRows.map(r => `
+            <tr class="hover:bg-slate-900/60 transition" id="row_tr_${r.id}">
+                <td class="p-2">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                        ${r.tariff ? `<span class="tariff-tag">${escapeHtml(r.tariff)}</span>` : ''}
+                        <span class="text-slate-200 text-xs truncate max-w-xs" title="${escapeHtml(r.rawTitle)}">${escapeHtml(r.rawTitle)}</span>
+                    </div>
+                </td>
+                <td class="p-2">
+                    <div class="flex items-center gap-1">
+                        <input type="number" class="pro-input num-input text-xs w-32" value="${r.amount || 0}" step="1000"
+                            oninput="app.updateExtractedRowVal('${r.id}', 'amount', this.value)">
+                        <span class="text-[10px] font-mono text-slate-400 shrink-0">${r.unit || 'Kč'}</span>
+                    </div>
+                </td>
+                <td class="p-2">
+                    <div class="flex items-center gap-1">
+                        <input type="number" class="pro-input prem-input text-xs w-24" value="${r.itemPrem || 0}" step="1"
+                            oninput="app.updateExtractedRowVal('${r.id}', 'itemPrem', this.value)">
+                        <span class="text-[10px] font-mono text-slate-400 shrink-0">Kč/m</span>
+                    </div>
+                </td>
+                <td class="p-2">
+                    <select class="pro-input text-xs w-full" onchange="app.updateExtractedRowCategory('${r.id}', this.value)">
+                        ${buildCategorySelectOptions(r.categoryKey)}
+                    </select>
+                </td>
+                <td class="p-2 text-center">
+                    <button type="button" onclick="app.removeExtractedRow('${r.id}')" class="text-slate-400 hover:text-red-400 p-1 font-bold" title="Odstranit řádek">✕</button>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    /* Vykreslení přehledné karty vytěžené smlouvy s interaktivní kontrolní tabulkou v modalu */
+    function renderExtractedContractPreview(parsed, sourceFileName) {
+        const prev = document.getElementById('docExtractedPreview');
+        const btnForm = document.getElementById('docOpenInFormBtn');
+        const btnSave = document.getElementById('docSaveDirectBtn');
+        const aiBtn = document.getElementById('docAiRefineBtn');
+        if (!prev) return;
+
+        const clientOptions = (state.clients || []).map(cl =>
+            `<option value="${cl.id}" ${parsed.clientId === cl.id ? 'selected' : ''}>${escapeHtml(cl.name)}</option>`
+        ).join('');
+
+        const totalItemPrem = Object.values(parsed.itemPremiums || {}).reduce((s, v) => s + num(v), 0);
+
+        prev.innerHTML = `
+            <div class="p-4 rounded-lg border border-emerald-500/40 bg-emerald-950/15 space-y-3">
+                <div class="flex items-center justify-between flex-wrap gap-2 border-b border-slate-800 pb-2.5">
+                    <div class="flex items-center gap-2">
+                        <span class="badge badge-emerald">✓ Vytěženo z dokumentu</span>
+                        <span class="text-xs font-semibold text-slate-100">${escapeHtml(sourceFileName || 'Dokument smlouvy')}</span>
+                    </div>
+                    <span class="text-[11px] font-mono text-sky-300">
+                        Nalezeno ${parsed.extractedRows ? parsed.extractedRows.length : parsed.matchedSummary.length} položek · Součet pojistného položek: <strong class="text-amber-300" id="docHeaderSumIP">${fmt(totalItemPrem)} Kč/měs</strong>
+                    </span>
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 text-xs">
+                    <div class="p-2 rounded bg-slate-900/80 border border-slate-800">
+                        <div class="text-[10px] uppercase text-slate-400 font-bold">Přiřadit osobě</div>
+                        <select id="docPreviewClientSelect" class="pro-input text-xs mt-1" onchange="app.updateExtractedClient(this.value)">
+                            ${clientOptions}
+                        </select>
+                    </div>
+                    <div class="p-2 rounded bg-slate-900/80 border border-slate-800">
+                        <div class="text-[10px] uppercase text-slate-400 font-bold">Pojišťovna</div>
+                        <div class="font-semibold text-slate-100 mt-1">${escapeHtml(parsed.insurer || 'Nerozpoznáno (vyberete ve formuláři)')}</div>
+                        ${parsed.productDetected ? `<div class="text-[10px] text-sky-400">${escapeHtml(parsed.productDetected)}</div>` : ''}
+                    </div>
+                    <div class="p-2 rounded bg-slate-900/80 border border-slate-800">
+                        <div class="text-[10px] uppercase text-slate-400 font-bold">Číslo smlouvy</div>
+                        <div class="font-mono font-bold text-amber-300 mt-1">${escapeHtml(parsed.contractNo || '—')}</div>
+                    </div>
+                    <div class="p-2 rounded bg-slate-900/80 border border-slate-800">
+                        <div class="text-[10px] uppercase text-slate-400 font-bold">Trvání (Od–Do)</div>
+                        <div class="font-mono text-slate-200 mt-1">${parsed.start || '?'} – ${parsed.end || '?'}</div>
+                    </div>
+                    <div class="p-2 rounded bg-slate-900/80 border border-slate-800">
+                        <div class="text-[10px] uppercase text-slate-400 font-bold">Běžné pojistné</div>
+                        <div class="font-mono font-bold text-emerald-300 mt-1" id="docBadgePrem">${parsed.premium ? fmtCZK(parsed.premium) : '—'}</div>
+                    </div>
+                    <div class="p-2 rounded bg-slate-900/80 border border-slate-800">
+                        <div class="text-[10px] uppercase text-slate-400 font-bold">Podmínky</div>
+                        <div class="text-[11px] text-slate-300 mt-1">TN ${parsed.tnProgression}% · PN ${parsed.pnFromDay}.d${parsed.pnRetroactive ? ' zp.' : ''}</div>
+                    </div>
+                </div>
+
+                <!-- INTERAKTIVNÍ KONTROLNÍ TABULKA OCR -->
+                <div class="p-3 rounded-lg border border-slate-700 bg-slate-900/90 space-y-2 mt-2">
+                    <div class="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                            <div class="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                                <i data-lucide="list-checks" class="w-4 h-4 text-emerald-400"></i>
+                                Položky vytěžené ze smlouvy — kontrola a možnost okamžité úpravy před vložením
+                            </div>
+                            <div class="text-[11px] text-slate-400">
+                                Libovolnou chybně rozpoznanou částku, pojistné či kategorii můžete přímo v tabulce přepsat nebo položku přeřadit.
+                            </div>
+                        </div>
+                        <button type="button" onclick="app.addExtractedRowManual()" class="btn-secondary text-[11px] py-1 px-2.5 flex items-center gap-1">
+                            <i data-lucide="plus" class="w-3 h-3 text-sky-400"></i>+ Přidat položku ze smlouvy
+                        </button>
+                    </div>
+
+                    <div class="overflow-x-auto max-h-[340px] overflow-y-auto border border-slate-800 rounded">
+                        <table class="w-full text-xs text-left">
+                            <thead class="bg-slate-950 text-slate-400 font-mono text-[10px] uppercase sticky top-0 border-b border-slate-800">
+                                <tr>
+                                    <th class="p-2">Druh pojištění / Kód tarifu ze smlouvy</th>
+                                    <th class="p-2 w-44">Pojistná částka / dávka</th>
+                                    <th class="p-2 w-32">Pojistné (Kč/měs)</th>
+                                    <th class="p-2 w-64">Zařadit do kategorie v aplikaci</th>
+                                    <th class="p-2 w-10 text-center">Akce</th>
+                                </tr>
+                            </thead>
+                            <tbody id="extractedRowsTbody" class="divide-y divide-slate-800/60 bg-slate-950/40 font-sans">
+                                ${renderExtractedRowsHtml(parsed)}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="flex items-center justify-between text-xs text-slate-400 pt-1.5 flex-wrap gap-2 border-t border-slate-800/80">
+                        <div>
+                            Součet položek: <strong class="text-amber-300 font-mono" id="docExtractedSumIP">${fmt(totalItemPrem)} Kč/měs</strong>
+                            · Celkové pojistné smlouvy: <strong class="text-sky-300 font-mono" id="docExtractedPrem">${parsed.premium ? fmt(parsed.premium) + ' Kč' : '0 Kč'}</strong>
+                        </div>
+                        <button type="button" onclick="app.syncExtractedTotalFromItems()" class="text-[11px] text-sky-400 hover:underline font-mono">
+                            ↳ Převzít součet položek (${fmt(totalItemPrem)} Kč) jako celkové pojistné smlouvy
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        prev.classList.remove('hidden');
+        if (btnForm) btnForm.classList.remove('hidden');
+        if (btnSave) btnSave.classList.remove('hidden');
+        if (aiBtn)   aiBtn.classList.remove('hidden');
+        if (window.lucide) lucide.createIcons();
+    }
+
+    /* Funkce pro interaktivní úpravy řádků v OCR kontrolní tabulce */
+    function updateExtractedRowVal(id, field, val) {
+        if (!lastExtractedContract || !lastExtractedContract.extractedRows) return;
+        const row = lastExtractedContract.extractedRows.find(r => r.id === id);
+        if (!row) return;
+        row[field] = num(val);
+        syncExtractedRowsToParsed();
+    }
+
+    function updateExtractedRowCategory(id, catKey) {
+        if (!lastExtractedContract || !lastExtractedContract.extractedRows) return;
+        const row = lastExtractedContract.extractedRows.find(r => r.id === id);
+        if (!row) return;
+        row.categoryKey = catKey;
+        const cat = D.CATEGORY_BY_KEY[catKey];
+        if (cat) row.unit = cat.kind === 'daily' ? 'Kč/den' : cat.kind === 'monthly' ? 'Kč/měs' : 'Kč';
+        syncExtractedRowsToParsed();
+    }
+
+    function removeExtractedRow(id) {
+        if (!lastExtractedContract || !lastExtractedContract.extractedRows) return;
+        lastExtractedContract.extractedRows = lastExtractedContract.extractedRows.filter(r => r.id !== id);
+        syncExtractedRowsToParsed();
+        const tr = document.getElementById('row_tr_' + id);
+        if (tr) tr.remove();
+    }
+
+    function addExtractedRowManual() {
+        if (!lastExtractedContract) return;
+        lastExtractedContract.extractedRows = lastExtractedContract.extractedRows || [];
+        const newId = 'er_' + Math.random().toString(36).substr(2, 7);
+        lastExtractedContract.extractedRows.push({
+            id: newId,
+            tariff: 'RUČNÍ',
+            rawTitle: 'Nové připojištění',
+            categoryKey: 'smrt',
+            amount: 500000,
+            itemPrem: 50,
+            unit: 'Kč'
+        });
+        syncExtractedRowsToParsed();
+        renderExtractedContractPreview(lastExtractedContract, 'Ručně přidaná položka');
+    }
+
+    function syncExtractedTotalFromItems() {
+        if (!lastExtractedContract) return;
+        const totalIP = Object.values(lastExtractedContract.itemPremiums || {}).reduce((s, v) => s + num(v), 0);
+        lastExtractedContract.premium = totalIP;
+        const premEl = document.getElementById('docExtractedPrem');
+        const badgeEl = document.getElementById('docBadgePrem');
+        if (premEl) premEl.textContent = `${fmt(totalIP)} Kč`;
+        if (badgeEl) badgeEl.textContent = fmtCZK(totalIP);
+        toast(`Celkové pojistné nastaveno na ${fmt(totalIP)} Kč`, 'success');
+    }
+
+    function syncExtractedRowsToParsed() {
+        if (!lastExtractedContract) return;
+        const p = lastExtractedContract;
+        p.items = Object.fromEntries(D.CATEGORIES.map(c => [c.key, 0]));
+        p.itemPremiums = Object.fromEntries(D.CATEGORIES.map(c => [c.key, 0]));
+
+        (p.extractedRows || []).forEach(r => {
+            if (!r.categoryKey || r.categoryKey === 'IGNORE') return;
+            const amt = num(r.amount);
+            const prem = num(r.itemPrem);
+            if (r.categoryKey === '__COMBO_SMRT_INV_KLES__') {
+                p.items.smrtKles = Math.max(p.items.smrtKles || 0, amt);
+                p.items.invKles  = Math.max(p.items.invKles || 0, amt);
+                if (prem > 0) p.itemPremiums.invKles = (p.itemPremiums.invKles || 0) + prem;
+            } else {
+                let finalAmt = amt;
+                if (r.unit === 'Kč/měs' && ['pn15', 'pn28', 'pn61'].includes(r.categoryKey) && amt >= 2000) {
+                    finalAmt = Math.round(amt / 30);
+                }
+                p.items[r.categoryKey] = (p.items[r.categoryKey] || 0) + finalAmt;
+                if (prem > 0) p.itemPremiums[r.categoryKey] = (p.itemPremiums[r.categoryKey] || 0) + prem;
+            }
+        });
+
+        p.matchedSummary = [];
+        D.CATEGORIES.forEach(cat => {
+            const v = num(p.items[cat.key]);
+            const pv = num(p.itemPremiums[cat.key]);
+            if (v > 0 || pv > 0) {
+                p.matchedSummary.push({
+                    key: cat.key,
+                    label: cat.label,
+                    val: v,
+                    prem: pv,
+                    formatted: fmtCatValue(v, cat),
+                    formattedPrem: pv > 0 ? `${fmt(pv)} Kč/měs` : '—'
+                });
+            }
+        });
+
+        const sumIP = Object.values(p.itemPremiums).reduce((s, v) => s + num(v), 0);
+        const sumEl = document.getElementById('docExtractedSumIP');
+        const headerSumEl = document.getElementById('docHeaderSumIP');
+        if (sumEl) sumEl.textContent = `${fmt(sumIP)} Kč/měs`;
+        if (headerSumEl) headerSumEl.textContent = `${fmt(sumIP)} Kč/měs`;
+    }
+
+    function updateExtractedClient(clientId) {
+        if (lastExtractedContract) lastExtractedContract.clientId = clientId;
+    }
+
+    async function processUploadedContractFile(file, statusCb) {
+        const name = (file.name || '').toLowerCase();
+        let extractedText = '';
+        lastUploadedImages = [];
+
+        if (name.endsWith('.pdf') || file.type === 'application/pdf') {
+            if (statusCb) statusCb(`Načítám PDF smlouvu „${file.name}"…`);
+            const pdfRes = await extractTextFromPdfFile(file);
+            extractedText = pdfRes.text;
+            lastUploadedImages = pdfRes.images || [];
+            if (extractedText.replace(/---\s*STRANA\s*---/g, '').trim().length < 40 && lastUploadedImages.length > 0) {
+                extractedText = await extractTextFromImageOrScan(lastUploadedImages, statusCb);
+            }
+        } else if (/\.(jpg|jpeg|png|webp)$/i.test(name) || file.type.startsWith('image/')) {
+            if (statusCb) statusCb(`Zpracovávám snímek smlouvy „${file.name}"…`);
+            const dataUrl = await readFileAsDataUrl(file);
+            lastUploadedImages = [dataUrl];
+            extractedText = await extractTextFromImageOrScan(lastUploadedImages, statusCb);
+        } else {
+            if (statusCb) statusCb(`Čtu textový soubor „${file.name}"…`);
+            extractedText = await file.text();
+        }
+
+        const parsed = parseCzechPolicyText(extractedText);
+        return { extractedText, parsed };
+    }
+
+    async function handleContractFileSelect(ev) {
+        const file = ev.target?.files?.[0] || ev.dataTransfer?.files?.[0];
+        if (!file) return;
+        const stBox = document.getElementById('docUploadStatus');
+        const stTxt = document.getElementById('docUploadStatusText');
+        const rawEl = document.getElementById('docRawTextInput');
+        if (stBox) stBox.classList.remove('hidden');
+        const setStatus = msg => { if (stTxt) stTxt.textContent = msg; };
+
+        try {
+            const { extractedText, parsed } = await processUploadedContractFile(file, setStatus);
+            lastExtractedContract = parsed;
+            if (rawEl) rawEl.value = extractedText;
+            setStatus(`Hotovo: dokument „${file.name}" byl analyzován (${parsed.insurer || 'pojišťovna neurčena'}, nalezeno ${parsed.matchedSummary.length} rizik).`);
+            renderExtractedContractPreview(parsed, file.name);
+            toast(`Smlouva vytěžena (${parsed.matchedSummary.length} rizik)`, 'success');
+        } catch (err) {
+            console.error('Contract file parse error:', err);
+            setStatus('Chyba při zpracování dokumentu: ' + err.message);
+            toast('Chyba čtení dokumentu: ' + err.message, 'error');
+        }
+    }
+
+    function reparseDocRawText() {
+        const rawEl = document.getElementById('docRawTextInput');
+        if (!rawEl || !rawEl.value.trim()) {
+            toast('Nejprve nahrajte dokument nebo vložte text smlouvy.', 'info');
+            return;
+        }
+        const parsed = parseCzechPolicyText(rawEl.value);
+        lastExtractedContract = parsed;
+        renderExtractedContractPreview(parsed, 'Upravený text smlouvy');
+        toast(`Text znovu analyzován (${parsed.matchedSummary.length} rizik)`, 'success');
+    }
+
+    async function refineDocWithAi() {
+        const rawEl = document.getElementById('docRawTextInput');
+        const text = rawEl ? rawEl.value.trim() : '';
+        if (!text) { toast('Žádný text k AI analýze.', 'info'); return; }
+        const btn = document.getElementById('docAiRefineBtn');
+        const stTxt = document.getElementById('docUploadStatusText');
+        if (btn) btn.disabled = true;
+        if (stTxt) stTxt.textContent = 'AI (Groq) analyzuje detaily pojistné smlouvy…';
+
+        try {
+            const insurerList = D.INSURER_NAMES.join(', ');
+            const catList = D.CATEGORIES.map(c => `${c.key}: ${c.label} (${c.kind === 'daily' ? 'Kč/den' : c.kind === 'monthly' ? 'Kč/měs' : 'Kč'})`).join('\n');
+            const messages = [
+                {
+                    role: 'system',
+                    content: 'Jsi expertní analytik českých životních pojistných smluv. Z textu pojistné smlouvy vytěžíš strukturovaný JSON objekt včetně pojistné částky (items) i měsíčního pojistného za každou položku (itemPremiums). Vrať POUZE platný JSON objekt.'
+                },
+                {
+                    role: 'user',
+                    content: `Povolené názvy pojišťoven: ${insurerList}.\nKategorie pojištění (klíče):\n${catList}\n\nVrať JSON objekt ve tvaru:\n{\n  "insurer": "přesný název pojišťovny ze seznamu",\n  "productDetected": "název produktu",\n  "contractNo": "číslo smlouvy",\n  "clientName": "jméno pojištěného",\n  "start": rok_pocatku_cislo,\n  "end": rok_konce_cislo,\n  "premium": mesicni_pojistne_celkem_cislo,\n  "tnProgression": 800,\n  "pnFromDay": 29,\n  "pnRetroactive": true/false,\n  "items": { "smrt": 0, "invalidita": 0, ... },\n  "itemPremiums": { "smrt": 0, "invalidita": 0, ... },\n  "note": "stručná poznámka"\n}\n\nTEXT SMLOUVY:\n${text.slice(0, 12000)}`
+                }
+            ];
+            const aiResp = await callGroq(messages);
+            const m = aiResp.match(/\{[\s\S]*\}/);
+            if (!m) throw new Error('AI nevrátila platný JSON objekt.');
+            const aiObj = JSON.parse(m[0]);
+            const base = lastExtractedContract || parseCzechPolicyText(text);
+            if (aiObj.insurer) base.insurer = aiObj.insurer;
+            if (aiObj.productDetected) base.productDetected = aiObj.productDetected;
+            if (aiObj.contractNo) base.contractNo = String(aiObj.contractNo);
+            if (aiObj.start) base.start = num(aiObj.start);
+            if (aiObj.end)   base.end   = num(aiObj.end);
+            if (aiObj.premium) base.premium = num(aiObj.premium);
+            if (aiObj.tnProgression) base.tnProgression = num(aiObj.tnProgression);
+            if (aiObj.pnFromDay) base.pnFromDay = num(aiObj.pnFromDay);
+            if (typeof aiObj.pnRetroactive === 'boolean') base.pnRetroactive = aiObj.pnRetroactive;
+            if (aiObj.note) base.note = aiObj.note;
+            if (aiObj.items && typeof aiObj.items === 'object') {
+                D.CATEGORIES.forEach(cat => {
+                    if (num(aiObj.items[cat.key]) > 0) base.items[cat.key] = num(aiObj.items[cat.key]);
+                });
+            }
+            base.itemPremiums = base.itemPremiums || {};
+            if (aiObj.itemPremiums && typeof aiObj.itemPremiums === 'object') {
+                D.CATEGORIES.forEach(cat => {
+                    if (num(aiObj.itemPremiums[cat.key]) > 0) base.itemPremiums[cat.key] = num(aiObj.itemPremiums[cat.key]);
+                });
+            }
+            const sumIP = Object.values(base.itemPremiums).reduce((s, v) => s + num(v), 0);
+            if (!base.premium && sumIP > 0) base.premium = sumIP;
+
+            base.matchedSummary = [];
+            base.extractedRows = [];
+            D.CATEGORIES.forEach(cat => {
+                const v = num(base.items[cat.key]);
+                const pv = num(base.itemPremiums[cat.key]);
+                if (v > 0 || pv > 0) {
+                    base.matchedSummary.push({
+                        key: cat.key,
+                        label: cat.label,
+                        val: v,
+                        prem: pv,
+                        formatted: fmtCatValue(v, cat),
+                        formattedPrem: pv > 0 ? `${fmt(pv)} Kč/měs` : '—'
+                    });
+                    base.extractedRows.push({
+                        id: 'er_' + cat.key + '_' + Math.random().toString(36).substr(2, 6),
+                        tariff: '',
+                        rawTitle: cat.label,
+                        categoryKey: cat.key,
+                        amount: v,
+                        itemPrem: pv,
+                        unit: cat.kind === 'daily' ? 'Kč/den' : cat.kind === 'monthly' ? 'Kč/měs' : 'Kč'
+                    });
+                }
+            });
+            lastExtractedContract = base;
+            renderExtractedContractPreview(base, 'Zpřesněno přes AI (Groq)');
+            if (stTxt) stTxt.textContent = `AI analýza dokončena (${base.matchedSummary.length} rizik).`;
+            toast('AI zpřesnila vytěžená data smlouvy (včetně pojistného po položkách)', 'success');
+        } catch (e) {
+            toast('AI zpřesnění selhalo: ' + e.message, 'error');
+            if (stTxt) stTxt.textContent = 'AI zpřesnění selhalo: ' + e.message;
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    /* Vyplnění polí přímo v otevřeném modalu smlouvy (#contractModal) */
+    function fillOpenContractModalWithParsed(parsed) {
+        if (!parsed) return;
+        const setVal = (id, val) => { const el = document.getElementById(id); if (el && val != null && val !== '') el.value = val; };
+        const setChk = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+
+        if (parsed.clientId) setVal('mod_client', parsed.clientId);
+        if (parsed.insurer) {
+            const insSel = document.getElementById('mod_insurer');
+            const wrap = document.getElementById('mod_otherInsurerWrap');
+            if (insSel) {
+                if (D.INSURER_NAMES.includes(parsed.insurer)) {
+                    insSel.value = parsed.insurer;
+                    if (wrap) wrap.classList.add('hidden');
+                } else {
+                    insSel.value = 'OTHER';
+                    if (wrap) wrap.classList.remove('hidden');
+                    setVal('mod_otherInsurer', parsed.insurer);
+                }
+            }
+        }
+        if (parsed.contractNo) setVal('mod_contractNo', parsed.contractNo);
+        if (parsed.start)      setVal('mod_start', parsed.start);
+        if (parsed.end)        setVal('mod_end', parsed.end);
+        if (parsed.premium) {
+            setVal('mod_premium', parsed.premium);
+            const prEl = document.getElementById('mod_premium');
+            if (prEl) prEl.classList.toggle('has-val', num(parsed.premium) > 0);
+        }
+        if (parsed.paymentFrequency) setVal('mod_freq', parsed.paymentFrequency);
+        if (parsed.contractType)     setVal('mod_contractType', parsed.contractType);
+        if (parsed.tnProgression)    setVal('mod_tnProg', String(parsed.tnProgression));
+        if (parsed.pnFromDay)        setVal('mod_pnFromDay', String(parsed.pnFromDay));
+        setChk('mod_pnRetroactive', parsed.pnRetroactive);
+        setChk('mod_invPsych', parsed.invPsychIncluded !== false);
+        setChk('mod_backPain', parsed.backPainIncluded);
+        if (parsed.note) setVal('mod_actionReason', parsed.note);
+
+        let filledCount = 0;
+        D.CATEGORIES.forEach(cat => {
+            const val = num(parsed.items && parsed.items[cat.key]);
+            const pval = num(parsed.itemPremiums && parsed.itemPremiums[cat.key]);
+            const input = document.getElementById('mod_item_' + cat.key);
+            const pInput = document.getElementById('mod_prem_' + cat.key);
+            if (input && val > 0) {
+                input.value = val;
+                input.classList.add('has-val');
+                input.style.borderColor = '#10b981';
+                input.style.backgroundColor = 'rgba(16, 185, 129, 0.12)';
+                filledCount++;
+            }
+            if (pInput && pval > 0) {
+                pInput.value = pval;
+                pInput.classList.add('has-val');
+                pInput.style.borderColor = '#f59e0b';
+                pInput.style.backgroundColor = 'rgba(245, 158, 11, 0.15)';
+            }
+        });
+        recalcModalItemPremiums(false);
+
+        const inlineSt = document.getElementById('mod_inlineUploadStatus');
+        if (inlineSt) {
+            inlineSt.innerHTML = `<span class="text-emerald-300 font-semibold">✓ Ze souboru vyplněno: ${escapeHtml(parsed.insurer || 'Pojišťovna')} ${parsed.contractNo ? 'č. ' + escapeHtml(parsed.contractNo) : ''}, celkové pojistné ${fmtCZK(parsed.premium || 0)} a ${filledCount} pojistných rizik včetně pojistného za položku.</span>`;
+        }
+    }
+
+    async function handleInlineModalFileUpload(ev) {
+        const file = ev.target?.files?.[0];
+        if (!file) return;
+        const inlineSt = document.getElementById('mod_inlineUploadStatus');
+        const setSt = msg => { if (inlineSt) inlineSt.textContent = msg; };
+        try {
+            const { parsed } = await processUploadedContractFile(file, setSt);
+            fillOpenContractModalWithParsed(parsed);
+            toast(`Formulář předvyplněn ze souboru (${parsed.matchedSummary.length} rizik)`, 'success');
+        } catch (err) {
+            toast('Chyba načtení souboru: ' + err.message, 'error');
+        }
+        ev.target.value = '';
+    }
+
+    function applyExtractedContractToForm(openModalAfter) {
+        if (!lastExtractedContract) {
+            toast('Nejprve nahrajte dokument smlouvy.', 'info');
+            return;
+        }
+        if (!state.clients.length) {
+            state.clients.push({
+                id: uid(),
+                name: lastExtractedContract.clientName || 'Klient 1',
+                role: 'adult',
+                birthYear: lastExtractedContract.birthYear || 1985,
+                incomeGross: 45000,
+                expensesMonthly: 22000,
+                reserveCash: 100000,
+                isEntrepreneur: false,
+                occupationRisk: '1',
+                note: ''
+            });
+        }
+        const p = lastExtractedContract;
+        const clientId = p.clientId || state.clients[0].id;
+        const newC = emptyContract(clientId, docUploadTarget);
+        newC.insurer = p.insurer || '';
+        newC.contractNo = p.contractNo || '';
+        newC.start = p.start || new Date().getFullYear();
+        newC.end = p.end || null;
+        newC.premium = num(p.premium);
+        newC.note = p.note || '';
+        newC.actionReason = p.note || '';
+        newC.conditions = Object.assign(newC.conditions, {
+            contractType: p.contractType || 'risk',
+            paymentFrequency: p.paymentFrequency || 'monthly',
+            tnProgression: p.tnProgression || 800,
+            pnFromDay: p.pnFromDay || 29,
+            pnWaitingDays: p.pnFromDay || 29,
+            pnRetroactive: !!p.pnRetroactive,
+            invPsychIncluded: p.invPsychIncluded !== false,
+            backPainIncluded: !!p.backPainIncluded
+        });
+        D.CATEGORIES.forEach(cat => {
+            newC.items[cat.key] = num(p.items && p.items[cat.key]);
+            newC.itemPremiums[cat.key] = num(p.itemPremiums && p.itemPremiums[cat.key]);
+        });
+
+        const targetList = docUploadTarget === 'current' ? state.currentContracts : state.proposedContracts;
+        targetList.push(newC);
+        save();
+        closeDocUploadModal();
+        switchTab(docUploadTarget === 'current' ? 'stavajici' : 'navrh');
+        renderAll();
+
+        if (openModalAfter) {
+            editContract(docUploadTarget, newC.id);
+            setTimeout(() => fillOpenContractModalWithParsed(p), 50);
+            toast('Smlouva načtena do formuláře ke kontrole', 'success');
+        } else {
+            toast(`Smlouva ${newC.insurer || ''} (${newC.contractNo || 'nová'}) uložena`, 'success');
         }
     }
 
@@ -2843,32 +4536,35 @@
             });
 
             /* ════════════════════════════════════════════════════════════════
-               LIST 2: 2. Srovnání krytí (32 rizik + Rozpad po osobách)
+               LIST 2: 2. Srovnání krytí (33 rizik + Pojistné za položku + Rozpad po osobách)
                ════════════════════════════════════════════════════════════════ */
-            const ws2 = wb.addWorksheet('2. Srovnání krytí (32 rizik)', {
+            const ws2 = wb.addWorksheet('2. Srovnání krytí & Pojistné', {
                 properties: { tabColor: { argb: 'FF10B981' } },
                 views: [{ state: 'frozen', ySplit: 5, showGridLines: true }],
                 pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
             });
             ws2.columns = [
-                { width: 26 }, { width: 34 }, { width: 15 }, { width: 18 },
-                { width: 18 }, { width: 18 }, { width: 14 }, { width: 20 }, { width: 42 }
+                { width: 24 }, { width: 32 }, { width: 14 }, { width: 17 },
+                { width: 15 }, { width: 17 }, { width: 15 }, { width: 17 }, { width: 15 }, { width: 19 }, { width: 38 }
             ];
-            addSheetBanner(ws2, 'POLOŽKOVÉ SROVNÁNÍ POJISTNÉHO KRYTÍ: STÁVAJÍCÍ STAV × NÁVRH PORADCE', 'Kompletní srovnání všech 32 pojistných kategorií v 6 skupinách rizik + rozpad po jednotlivých osobách', 9);
-            addSectionBar(ws2, 'ČÁST A: SOUHRNNÉ SROVNÁNÍ CELÉHO PORTFOLIA DLE SKUPIN POJISTNÝCH RIZIK', 9, 'FF047857');
+            addSheetBanner(ws2, 'POLOŽKOVÉ SROVNÁNÍ POJISTNÉ ČÁSTKY A POJISTNÉHO ZA POLOŽKU: STÁVAJÍCÍ × NÁVRH', 'Kompletní srovnání všech 33 pojistných kategorií v 6 skupinách rizik včetně rozpadu měsíčního pojistného za položku', 11);
+            addSectionBar(ws2, 'ČÁST A: SOUHRNNÉ SROVNÁNÍ POJISTNÉ ČÁSTKY A MĚSÍČNÍHO POJISTNÉHO DLE SKUPIN RIZIK', 11, 'FF047857');
 
             const cmpHead = ws2.addRow([
                 'Skupina rizik', 'Pojistné riziko / kategorie', 'Typ plnění',
-                'Stávající stav', 'Návrh poradce', 'Rozdíl (Δ)', 'Změna (%)', 'Vyhodnocení změny', 'Popis a metodická poznámka'
+                'Stávající PČ', 'Stáv. pojistné', 'Návrh PČ', 'Návrh pojistné',
+                'Rozdíl PČ (Δ)', 'Rozdíl poj. (Δ)', 'Vyhodnocení změny', 'Popis a metodická poznámka'
             ]);
-            styleTableHeader(cmpHead, 9, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'center' });
+            styleTableHeader(cmpHead, 11, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'right', 9: 'right', 10: 'center' });
 
             let cmpIdx = 0;
             D.CATEGORY_GROUPS.forEach(grp => {
                 const grpCats = D.CATEGORIES.filter(c => c.group === grp.key);
+                const grpCurPrem = sumGroupPremium(state.currentContracts, grp.key, 'ALL');
+                const grpNwPrem  = sumGroupPremium(state.proposedContracts, grp.key, 'ALL');
                 /* Mezititulek skupiny */
-                const grRow = ws2.addRow([grp.label.toUpperCase()]);
-                ws2.mergeCells(`A${grRow.number}:I${grRow.number}`);
+                const grRow = ws2.addRow([`${grp.label.toUpperCase()}   (Pojistné bloku: Stávající ${fmt(grpCurPrem)} Kč/měs → Návrh ${fmt(grpNwPrem)} Kč/měs)`]);
+                ws2.mergeCells(`A${grRow.number}:K${grRow.number}`);
                 grRow.height = 20;
                 grRow.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF075985' } };
                 grRow.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' } };
@@ -2878,14 +4574,18 @@
                 grpCats.forEach(cat => {
                     const curV = sumItem(state.currentContracts, cat.key);
                     const newV = sumItem(state.proposedContracts, cat.key);
+                    const curP = sumItemPremium(state.currentContracts, cat.key);
+                    const newP = sumItemPremium(state.proposedContracts, cat.key);
                     const diffV = newV - curV;
-                    const pctV = curV > 0 ? (diffV / curV) : (newV > 0 ? 1 : 0);
+                    const diffP = newP - curP;
                     const kindLabel = cat.kind === 'daily' ? 'Denní dávka' : cat.kind === 'monthly' ? 'Měsíční renta' : 'Jednorázová PČ';
                     let evalText = 'Beze změny';
                     if (curV === 0 && newV > 0) evalText = '★ NOVĚ DOPLNĚNO';
+                    else if (diffV > 0 && diffP <= 0) evalText = '▲ Vyšší PČ levněji';
                     else if (diffV > 0) evalText = '▲ Navýšení krytí';
                     else if (diffV < 0 && newV === 0) evalText = '✕ Zrušeno v návrhu';
                     else if (diffV < 0) evalText = '▼ Optimalizace PČ';
+                    else if (curV > 0 && diffV === 0 && diffP < 0) evalText = '✓ Stejná PČ levněji';
                     else if (curV === 0 && newV === 0) evalText = 'Nesjednáno';
 
                     const r = ws2.addRow([
@@ -2893,49 +4593,58 @@
                         cat.label,
                         kindLabel,
                         curV,
+                        curP,
                         newV,
+                        newP,
                         diffV,
-                        curV > 0 ? pctV : (newV > 0 ? 'Nové' : 0),
+                        diffP,
                         evalText,
                         cat.help || ''
                     ]);
-                    r.getCell(6).value = { formula: `E${r.number}-D${r.number}`, result: diffV };
-                    styleDataRow(r, 9, cmpIdx++ % 2 === 1, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'center' });
+                    r.getCell(8).value = { formula: `F${r.number}-D${r.number}`, result: diffV };
+                    r.getCell(9).value = { formula: `G${r.number}-E${r.number}`, result: diffP };
+                    styleDataRow(r, 11, cmpIdx++ % 2 === 1, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'right', 9: 'right', 10: 'center' });
                     r.getCell(2).font = { name: FONT, size: 9.5, bold: (curV > 0 || newV > 0), color: { argb: (curV > 0 || newV > 0) ? 'FF0F172A' : 'FF94A3B8' } };
                     r.getCell(4).numFmt = catFmt(cat, false);
-                    r.getCell(5).numFmt = catFmt(cat, false);
-                    if (newV > 0) r.getCell(5).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
-                    r.getCell(6).numFmt = catFmt(cat, true);
-                    applyDeltaStyle(r.getCell(6), diffV, false);
-                    if (typeof r.getCell(7).value === 'number') r.getCell(7).numFmt = '+0.0 %;-0.0 %;0.0 %';
+                    r.getCell(5).numFmt = FMT_MONTHLY;
+                    r.getCell(5).font = { name: FONT, size: 9, color: { argb: curP > 0 ? 'FFB45309' : 'FF94A3B8' } };
+                    r.getCell(6).numFmt = catFmt(cat, false);
+                    if (newV > 0) r.getCell(6).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
+                    r.getCell(7).numFmt = FMT_MONTHLY;
+                    r.getCell(7).font = { name: FONT, size: 9, bold: newP > 0, color: { argb: newP > 0 ? 'FF0369A1' : 'FF94A3B8' } };
+                    r.getCell(8).numFmt = catFmt(cat, true);
                     applyDeltaStyle(r.getCell(8), diffV, false);
+                    r.getCell(9).numFmt = FMT_MONTHLY_DELTA;
+                    applyDeltaStyle(r.getCell(9), diffP, true);
+                    applyDeltaStyle(r.getCell(10), diffV, false);
                 });
             });
 
             const totCmpM = ws2.addRow([
                 'FINANČNÍ BILANCE', 'Celkové měsíční pojistné', 'Měsíční platba',
-                curM, newM, diffM,
-                curM > 0 ? (diffM / curM) : 0,
+                0, curM, 0, newM, 0, diffM,
                 diffM <= 0 ? 'Úspora pojistného' : 'Navýšení rozpočtu',
                 `Ročně stávající: ${fmtCZK(curM * 12)} → Návrh poradce: ${fmtCZK(newM * 12)}/rok`
             ]);
-            totCmpM.getCell(6).value = { formula: `E${totCmpM.number}-D${totCmpM.number}`, result: diffM };
-            styleTotalRow(totCmpM, 9, { 3: 'center', 4: 'right', 5: 'right', 6: 'right', 7: 'right', 8: 'center' });
-            totCmpM.getCell(4).numFmt = FMT_CZK;
+            totCmpM.getCell(4).value = `${state.currentContracts.length} smluv`;
+            totCmpM.getCell(6).value = `${state.proposedContracts.length} smluv`;
+            totCmpM.getCell(8).value = '—';
+            totCmpM.getCell(9).value = { formula: `G${totCmpM.number}-E${totCmpM.number}`, result: diffM };
+            styleTotalRow(totCmpM, 11, { 3: 'center', 4: 'center', 5: 'right', 6: 'center', 7: 'right', 8: 'center', 9: 'right', 10: 'center' });
             totCmpM.getCell(5).numFmt = FMT_CZK;
-            totCmpM.getCell(6).numFmt = FMT_CZK_DELTA;
-            totCmpM.getCell(7).numFmt = '+0.0 %;-0.0 %;0.0 %';
+            totCmpM.getCell(7).numFmt = FMT_CZK;
+            totCmpM.getCell(9).numFmt = FMT_CZK_DELTA;
 
             ws2.addRow([]).height = 12;
 
             /* Část B: Srovnání po jednotlivých pojištěných osobách */
-            addSectionBar(ws2, 'ČÁST B: SROVNÁNÍ KLÍČOVÝCH RIZIK PO JEDNOTLIVÝCH POJIŠTĚNÝCH OSOBÁCH', 9, 'FF0369A1');
+            addSectionBar(ws2, 'ČÁST B: SROVNÁNÍ KLÍČOVÝCH RIZIK PO JEDNOTLIVÝCH POJIŠTĚNÝCH OSOBÁCH', 11, 'FF0369A1');
             const perPersonHead = ws2.addRow([
                 'Pojištěná osoba', 'Varianta', 'Měsíční pojistné', 'Smrt celkem (konst.+kles.)',
                 'Invalidita III. st. (konst.+kles.)', 'Invalidita II. / I. st.', 'Závažná onemocnění',
-                'Trvalé následky úrazu (základ)', 'Denní dávky (Úraz / Hosp. / PN)'
+                'Trvalé následky úrazu (základ)', 'Denní dávky (Úraz / Hosp. / PN)', 'Pojistné Smrt+Inv.', 'Pojistné Úraz+Nemoc'
             ]);
-            styleTableHeader(perPersonHead, 9, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' });
+            styleTableHeader(perPersonHead, 11, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center', 10: 'right', 11: 'right' });
 
             (state.clients || []).forEach((cl, cIdx) => {
                 const pCurList = (state.currentContracts || []).filter(c => c.clientId === cl.id);
@@ -2962,17 +4671,22 @@
                 const curDaily = `DO: ${sumItemFor(state.currentContracts, cl.id, 'uraz')}/d | Hosp: ${sumItemFor(state.currentContracts, cl.id, 'hosp')}/d | PN: ${sumItemFor(state.currentContracts, cl.id, 'pn15') + sumItemFor(state.currentContracts, cl.id, 'pn28') + sumItemFor(state.currentContracts, cl.id, 'pn61')}/d`;
                 const newDaily = `DO: ${sumItemFor(state.proposedContracts, cl.id, 'uraz')}/d | Hosp: ${sumItemFor(state.proposedContracts, cl.id, 'hosp')}/d | PN: ${sumItemFor(state.proposedContracts, cl.id, 'pn15') + sumItemFor(state.proposedContracts, cl.id, 'pn28') + sumItemFor(state.proposedContracts, cl.id, 'pn61')}/d`;
 
-                const rCur = ws2.addRow([cl.name, 'Stávající stav', pCurPrem, curS, curI3, curI21, curZO, curTN, curDaily]);
-                styleDataRow(rCur, 9, false, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' });
-                rCur.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
-                [3, 4, 5, 7, 8].forEach(col => { rCur.getCell(col).numFmt = FMT_CZK; });
+                const curPremCore = sumGroupPremium(state.currentContracts, 'death', cl.id) + sumGroupPremium(state.currentContracts, 'disability', cl.id) + sumGroupPremium(state.currentContracts, 'illness', cl.id);
+                const newPremCore = sumGroupPremium(state.proposedContracts, 'death', cl.id) + sumGroupPremium(state.proposedContracts, 'disability', cl.id) + sumGroupPremium(state.proposedContracts, 'illness', cl.id);
+                const curPremAcc  = sumGroupPremium(state.currentContracts, 'accident', cl.id) + sumGroupPremium(state.currentContracts, 'sickness', cl.id) + sumGroupPremium(state.currentContracts, 'addons', cl.id);
+                const newPremAcc  = sumGroupPremium(state.proposedContracts, 'accident', cl.id) + sumGroupPremium(state.proposedContracts, 'sickness', cl.id) + sumGroupPremium(state.proposedContracts, 'addons', cl.id);
 
-                const rNew = ws2.addRow([cl.name, 'Návrh poradce', pNewPrem, newS, newI3, newI21, newZO, newTN, newDaily]);
-                styleDataRow(rNew, 9, true, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' });
+                const rCur = ws2.addRow([cl.name, 'Stávající stav', pCurPrem, curS, curI3, curI21, curZO, curTN, curDaily, curPremCore, curPremAcc]);
+                styleDataRow(rCur, 11, false, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center', 10: 'right', 11: 'right' });
+                rCur.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0F172A' } };
+                [3, 4, 5, 7, 8, 10, 11].forEach(col => { rCur.getCell(col).numFmt = FMT_CZK; });
+
+                const rNew = ws2.addRow([cl.name, 'Návrh poradce', pNewPrem, newS, newI3, newI21, newZO, newTN, newDaily, newPremCore, newPremAcc]);
+                styleDataRow(rNew, 11, true, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center', 10: 'right', 11: 'right' });
                 rNew.getCell(1).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
                 rNew.getCell(2).font = { name: FONT, size: 9, bold: true, color: { argb: 'FF075985' } };
                 rNew.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' } };
-                [3, 4, 5, 7, 8].forEach(col => {
+                [3, 4, 5, 7, 8, 10, 11].forEach(col => {
                     rNew.getCell(col).numFmt = FMT_CZK;
                     rNew.getCell(col).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF0369A1' } };
                 });
@@ -2980,10 +4694,11 @@
                 const rDif = ws2.addRow([
                     cl.name, 'Rozdíl (Δ)',
                     pNewPrem - pCurPrem, newS - curS, newI3 - curI3, '—', newZO - curZO, newTN - curTN,
-                    cIdx === 0 ? 'Hlavní živitel rodiny' : (isChildPerson(cl) ? 'Dětský tarif' : 'Dospělá osoba')
+                    cIdx === 0 ? 'Hlavní živitel rodiny' : (isChildPerson(cl) ? 'Dětský tarif' : 'Dospělá osoba'),
+                    newPremCore - curPremCore, newPremAcc - curPremAcc
                 ]);
-                styleTotalRow(rDif, 9, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center' }, 'FFF1F5F9');
-                [3, 4, 5, 7, 8].forEach(col => {
+                styleTotalRow(rDif, 11, { 2: 'center', 3: 'right', 4: 'right', 5: 'right', 6: 'center', 7: 'right', 8: 'right', 9: 'center', 10: 'right', 11: 'right' }, 'FFF1F5F9');
+                [3, 4, 5, 7, 8, 10, 11].forEach(col => {
                     rDif.getCell(col).numFmt = FMT_CZK_DELTA;
                     applyDeltaStyle(rDif.getCell(col), num(rDif.getCell(col).value), col === 3);
                 });
@@ -3101,6 +4816,26 @@
                 totRow.getCell(6).numFmt = FMT_CZK;
                 activeSheetCats.forEach((cat, i) => {
                     totRow.getCell(9 + i).numFmt = catFmt(cat, false);
+                });
+
+                /* Přidáme řádek součtu měsíčního pojistného za každou jednotlivou položku (Kč/měs) */
+                const sumAllItemPrems = activeSheetCats.reduce((acc, cat) => acc + sumItemPremium(contractsList, cat.key), 0);
+                const itemPremVals = [
+                    '↳ Σ POJISTNÉ ZA POLOŽKU (Kč/měs)', 'Rozpad měsíčního pojistného dle rizik', '', '', '',
+                    sumAllItemPrems, '', '',
+                    ...activeSheetCats.map(cat => sumItemPremium(contractsList, cat.key)),
+                    'Součet měsíčního pojistného hrazeného za jednotlivé druhy pojištění'
+                ];
+                const itemPremRow = ws.addRow(itemPremVals);
+                styleDataRow(itemPremRow, totalCols, false, alignMap);
+                itemPremRow.getCell(1).font = { name: FONT, size: 9, bold: true, color: { argb: 'FF92400E' } };
+                itemPremRow.getCell(6).numFmt = FMT_MONTHLY;
+                itemPremRow.getCell(6).font = { name: FONT, size: 9, bold: true, color: { argb: 'FFB45309' } };
+                activeSheetCats.forEach((_, i) => {
+                    const cell = itemPremRow.getCell(9 + i);
+                    cell.numFmt = FMT_MONTHLY;
+                    cell.font = { name: FONT, size: 9, bold: true, color: { argb: 'FFB45309' } };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } };
                 });
 
                 if (isProposed) {
@@ -3414,6 +5149,21 @@
         renderAll();
         renderLegal();
         renderSettings();
+        /* Drag & Drop podpora pro nahrání smlouvy */
+        const dz = document.getElementById('docDropZone');
+        if (dz) {
+            ['dragenter', 'dragover'].forEach(evName => {
+                dz.addEventListener(evName, e => { e.preventDefault(); e.stopPropagation(); dz.classList.add('border-emerald-400'); });
+            });
+            ['dragleave', 'drop'].forEach(evName => {
+                dz.addEventListener(evName, e => { e.preventDefault(); e.stopPropagation(); dz.classList.remove('border-emerald-400'); });
+            });
+            dz.addEventListener('drop', e => {
+                if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+                    handleContractFileSelect({ dataTransfer: e.dataTransfer });
+                }
+            });
+        }
         if (window.lucide) lucide.createIcons();
     }
 
@@ -3423,6 +5173,12 @@
         setTableColMode,
         addContract, removeContract, duplicateContract, copyFromCurrent, copyKeptFromCurrent, updateContractAction,
         editContract, closeContractModal, saveContractModal, applyInsurerDefaults, copyInv3ToAll,
+        recalcModalItemPremiums, syncTotalPremiumFromItems, distributeTotalPremiumToItems,
+        openDocUploadModal, closeDocUploadModal, handleContractFileSelect, handleInlineModalFileUpload,
+        reparseDocRawText, refineDocWithAi, applyExtractedContractToForm, updateExtractedClient, parseCzechPolicyText,
+        updateExtractedRowVal, updateExtractedRowCategory, removeExtractedRow, addExtractedRowManual,
+        syncExtractedTotalFromItems, syncExtractedRowsToParsed,
+        updateModalInsurerBadges, applyMortgageComboInModal, setPnModalUnit,
         renderNeedsAnalysis, applyNeedsToProposal, updateTaxSim,
         addLoan, updateLoan, removeLoan,
         applyScenarioPreset, renderScenario, renderTnProgressionSim,

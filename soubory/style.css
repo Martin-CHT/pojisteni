@@ -389,31 +389,163 @@ input[type="number"] { -moz-appearance: textfield; }
     flex-wrap: wrap;
 }
 
-/* ── INSURANCE GRID (form for items) ── */
-.ins-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
-    gap: 0.45rem;
+/* ── INSURANCE FORM BLOCKS (Otázka vlevo → Pole vpravo) ── */
+.form-block {
+    background: #0b1324;
+    border: 1px solid #1e293b;
+    border-radius: 0.45rem;
+    overflow: hidden;
 }
-.ins-grid label {
+.form-block-header {
+    background: #131e34;
+    padding: 0.5rem 0.85rem;
+    border-bottom: 1px solid #1e293b;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.form-block-body {
+    padding: 0.25rem 0.75rem;
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
 }
-.ins-grid label > span {
-    font-size: 0.6rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    color: #94a3b8;
+.form-row {
+    display: grid;
+    grid-template-columns: minmax(195px, 1.45fr) minmax(150px, 1fr);
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.36rem 0.3rem;
+    border-bottom: 1px solid rgba(30, 41, 59, 0.65);
+    transition: background 0.12s;
+}
+.form-row:last-child {
+    border-bottom: none;
+}
+.form-row:hover {
+    background: rgba(30, 41, 59, 0.4);
+    border-radius: 0.25rem;
+}
+.form-label {
+    font-size: 0.76rem;
+    font-weight: 500;
+    color: #cbd5e1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+    line-height: 1.25;
+    cursor: pointer;
+}
+.form-unit {
+    font-size: 0.63rem;
+    font-family: 'JetBrains Mono', monospace;
+    color: #64748b;
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid #1e293b;
+    padding: 0.08rem 0.38rem;
+    border-radius: 0.2rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.form-field {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+}
+.pro-input.num-input {
+    text-align: right;
     font-weight: 600;
+}
+.pro-input.num-input.has-val {
+    border-color: rgba(56, 189, 248, 0.6);
+    background: rgba(14, 165, 233, 0.1);
+    color: #38bdf8;
+}
+.pro-input.prem-input {
+    text-align: right;
+    font-weight: 600;
+    border-color: rgba(71, 85, 105, 0.8);
+    background: rgba(15, 23, 42, 0.75);
+}
+.pro-input.prem-input.has-val {
+    border-color: rgba(245, 158, 11, 0.55);
+    background: rgba(245, 158, 11, 0.1);
+    color: #fbbf24;
+}
+.tariff-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(14, 165, 233, 0.15);
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    color: #7dd3fc;
+    font-weight: 600;
+    line-height: 1.2;
+}
+.form-cov-head {
+    display: grid;
+    grid-template-columns: minmax(175px, 1.45fr) minmax(115px, 0.95fr) minmax(90px, 0.7fr);
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.28rem 1.05rem;
+    background: rgba(15, 23, 42, 0.9);
+    border-bottom: 1px solid #1e293b;
+    font-size: 0.58rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #64748b;
+}
+.form-row-cov {
+    display: grid;
+    grid-template-columns: minmax(175px, 1.45fr) minmax(115px, 0.95fr) minmax(90px, 0.7fr);
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.34rem 0.3rem;
+    border-bottom: 1px solid rgba(30, 41, 59, 0.65);
+    transition: background 0.12s;
+}
+.form-row-cov:last-child {
+    border-bottom: none;
+}
+.form-row-cov:hover {
+    background: rgba(30, 41, 59, 0.4);
+    border-radius: 0.25rem;
+}
+.form-block-footer {
+    background: rgba(19, 30, 52, 0.75);
+    border-top: 1px solid #1e293b;
+    padding: 0.38rem 0.85rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.68rem;
+    color: #94a3b8;
+}
+@media (max-width: 540px) {
+    .form-row, .form-row-cov {
+        grid-template-columns: 1fr;
+        gap: 0.25rem;
+    }
+    .form-cov-head { display: none; }
+}
+
+/* ── INSURANCE GRID (fallback) ── */
+.ins-grid {
+    display: flex;
+    flex-direction: column;
 }
 
 /* ── COMPARISON ROW ── */
 .cmp-row {
     display: grid;
-    grid-template-columns: minmax(170px, 1.8fr) 1fr 1fr 1fr 1.2fr;
-    gap: 0.5rem;
-    padding: 0.32rem 0.6rem;
+    grid-template-columns: minmax(180px, 1.75fr) 0.95fr 0.75fr 0.95fr 0.75fr 1.05fr 1.1fr;
+    gap: 0.45rem;
+    padding: 0.35rem 0.6rem;
     border-bottom: 1px solid #1a2740;
     align-items: center;
     font-size: 0.72rem;
@@ -425,8 +557,8 @@ input[type="number"] { -moz-appearance: textfield; }
     font-size: 0.58rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 0.38rem 0.6rem;
+    letter-spacing: 0.05em;
+    padding: 0.4rem 0.6rem;
 }
 .cmp-group-header {
     background: #0b1426 !important;
@@ -434,10 +566,15 @@ input[type="number"] { -moz-appearance: textfield; }
     font-size: 0.62rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 0.3rem 0.6rem;
+    letter-spacing: 0.05em;
+    padding: 0.35rem 0.6rem;
     border-bottom: 1px solid #1e3a5f;
     border-top: 1px solid #1e3a5f;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
 }
 .cmp-row .v {
     font-family: 'JetBrains Mono', monospace;
@@ -573,6 +710,16 @@ html.light .border-slate-700 { border-color: #cbd5e1 !important; }
 html.light .client-card { background-color: #ffffff !important; border-color: #e2e8f0 !important; }
 html.light .contract-block { background-color: #ffffff !important; border-color: #e2e8f0 !important; }
 html.light .contract-block-header { background: #f1f5f9 !important; border-color: #e2e8f0 !important; }
+html.light .form-block { background-color: #ffffff !important; border-color: #cbd5e1 !important; }
+html.light .form-block-header { background: #f1f5f9 !important; border-color: #cbd5e1 !important; }
+html.light .form-row, html.light .form-row-cov { border-color: #e2e8f0; }
+html.light .form-row:hover, html.light .form-row-cov:hover { background: #f8fafc; }
+html.light .form-cov-head { background: #f8fafc; border-color: #cbd5e1; color: #475569; }
+html.light .form-block-footer { background: #f1f5f9; border-color: #cbd5e1; color: #334155; }
+html.light .form-label { color: #1e293b; }
+html.light .form-unit { background: #f1f5f9; border-color: #cbd5e1; color: #475569; }
+html.light .pro-input.num-input.has-val { border-color: #0284c7 !important; background-color: #f0f9ff !important; color: #0369a1 !important; }
+html.light .pro-input.prem-input.has-val { border-color: #d97706 !important; background-color: #fffbeb !important; color: #b45309 !important; }
 html.light .kpi-card { background-color: #f8fafc !important; border-color: #e2e8f0 !important; }
 html.light .cmp-row { border-color: #e2e8f0; }
 html.light .cmp-row:nth-child(odd) { background: #f8fafc; }

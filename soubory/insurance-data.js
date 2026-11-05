@@ -50,6 +50,9 @@ const INSURANCE_CATEGORIES = [
     { key: 'rentaPozustali',group: 'death',      core: false, kind: 'monthly', purpose: 'survivors',
       label: 'Pozůstalostní renta (měsíční)',    short: 'Renta poz.', mini: 'RP',    icon: 'calendar-clock',color: 'rose',
       help: 'Pravidelná měsíční renta vyplácená oprávněným osobám (partnerovi, dětem) po sjednanou dobu po úmrtí pojištěného.' },
+    { key: 'dozitiInvestice',group: 'death',     core: false, kind: 'sum',     purpose: 'savings',
+      label: 'Dožití / Investiční složka / Bonus', short: 'Dožití / Bonus', mini: 'Dož', icon: 'piggy-bank', color: 'rose',
+      help: 'Kapitálová hodnota na dožití, věrnostní bonus (tarif BON20) nebo garantovaná částka na dožití u IŽP/KŽP (RZP20).' },
 
     /* 2. INVALIDITA A DLOUHODOBÁ PÉČE (SOBĚSTAČNOST) */
     { key: 'invalidita',    group: 'disability', core: true,  kind: 'sum',     purpose: 'disability',
@@ -63,7 +66,10 @@ const INSURANCE_CATEGORIES = [
       help: 'Jednorázové plnění při přiznání invalidity I. stupně (pokles pracovní schopnosti o 35–49 %). Nejčastěji přiznávaný stupeň invalidity v ČR.' },
     { key: 'invKles',       group: 'disability', core: true,  kind: 'sum',     purpose: 'disability',
       label: 'Invalidita klesající (k úvěru)',   short: 'Inv. kles.', mini: 'InvK',  icon: 'trending-down',color: 'amber',
-      help: 'Klesající pojistná částka pro případ invalidity (typicky III. a II. stupně, příp. v souhrnném úvěrovém balíčku se smrtí) k zajištění nesplacené hypotéky.' },
+      help: 'Klesající pojistná částka pro případ invalidity III. stupně (nebo souhrnný hypoteční balíček, např. tarif IK320 / IK32B u Generali ČP).' },
+    { key: 'inv2Kles',      group: 'disability', core: true,  kind: 'sum',     purpose: 'disability',
+      label: 'Invalidita II. st. klesající (k úvěru)', short: 'Inv. II kles.', mini: 'Inv2K', icon: 'trending-down', color: 'amber',
+      help: 'Klesající pojistná částka pro případ invalidity II. stupně (např. samostatný tarif IK220 u Generali ČP s 50% fixací k hypotéce).' },
     { key: 'invRenta',      group: 'disability', core: false, kind: 'monthly', purpose: 'disability',
       label: 'Invalidní důchod / renta (měs.)',  short: 'Inv. renta', mini: 'InvR',  icon: 'repeat',       color: 'amber',
       help: 'Měsíční soukromá renta vyplácená pojišťovnou po dobu trvání invalidity (do sjednaného konce smlouvy / 65 let) k dorovnání státního důchodu.' },
@@ -140,11 +146,59 @@ const INSURANCE_CATEGORIES = [
       help: 'Proplacení nákladů na soukromou rehabilitaci, zdravotní pomůcky, kosmetické operace a rekonvalescenci po úrazu či vážné nemoci.' },
     { key: 'odpovednostObc',group: 'addons',     core: false, kind: 'sum',     purpose: 'addons',
       label: 'Občanská odpovědnost (v ŽP)',      short: 'Odpovědnost',mini: 'Odp',   icon: 'scale',        color: 'teal',
-      help: 'Pojistný limit občanské odpovědnosti za škodu v běžném životě (sjednaný v rámci životní smlouvy, např. u Kooperativy, ČPP, Generali).' }
+      help: 'Pojistný limit občanské odpovědnosti za škodu v běžném životě (sjednaný v rámci životní smlouvy, např. u Kooperativy, ČPP, Generali).' },
+    { key: 'ztrataRidicskeho', group: 'addons',  core: false, kind: 'monthly', purpose: 'addons',
+      label: 'Ztráta řidičského oprávnění (renta)', short: 'Ztráta ŘO', mini: 'ŘO',  icon: 'car',          color: 'teal',
+      help: 'Měsíční renta při odebrání řidičského oprávnění ze zdravotních důvodů (např. tarif RIDI0 u Generali ČP).' }
 ];
 
 /* Mapa key → kategorie pro rychlý lookup */
 const CATEGORY_BY_KEY = Object.fromEntries(INSURANCE_CATEGORIES.map(c => [c.key, c]));
+
+/* Orientační tržní sazby pojistného za jednotku krytí (pro rozpočítání celkového pojistného na položky, pokud není zadáno ručně) */
+const TARIFF_RATES = {
+    smrt: 0.00018, smrtKles: 0.00006, smrtUraz: 0.00008, smrtAutonehoda: 0.00005, rentaPozustali: 0.018, dozitiInvestice: 0.00010,
+    invalidita: 0.00019, inv2: 0.00014, inv1: 0.00013, invKles: 0.000095, inv2Kles: 0.000075, invRenta: 0.022, dlouhodobaPece: 0.018, zprosteni: 0.045,
+    zavOn: 0.00048, zavOnKles: 0.000375, zavOnMuzZena: 0.00028, cukrovkaKompl: 0.00025, trvaleNasledkyNemoc: 0.00016,
+    tnUraz: 0.000115, tnUraz10: 0.00007, uraz: 0.42, urazVelky: 0.16, zlomeninyPopaleniny: 0.0015, horniKoncetiny: 0.00023,
+    pn15: 0.85, pn28: 0.52, pn61: 0.24, osetrovani: 0.22, hosp: 0.19, hospUraz: 0.10,
+    chir: 0.0023, rekonvalescence: 0.0012, odpovednostObc: 0.000012, ztrataRidicskeho: 0.004
+};
+
+function estimateItemPremiums(items, totalMonthlyPremium) {
+    const out = Object.fromEntries(INSURANCE_CATEGORIES.map(c => [c.key, 0]));
+    if (!items) return out;
+    const activeKeys = [];
+    let rawSum = 0;
+    const rawMap = {};
+    INSURANCE_CATEGORIES.forEach(cat => {
+        const val = Math.max(0, Number(items[cat.key]) || 0);
+        if (val > 0) {
+            const rate = TARIFF_RATES[cat.key] || 0.0001;
+            const raw = Math.max(5, val * rate);
+            rawMap[cat.key] = raw;
+            rawSum += raw;
+            activeKeys.push(cat.key);
+        }
+    });
+    if (!activeKeys.length) return out;
+    const target = Math.max(0, Math.round(Number(totalMonthlyPremium) || 0));
+    if (target <= 0) {
+        activeKeys.forEach(k => { out[k] = Math.round(rawMap[k]); });
+        return out;
+    }
+    let allocated = 0;
+    activeKeys.forEach((k, idx) => {
+        if (idx === activeKeys.length - 1) {
+            out[k] = Math.max(0, target - allocated);
+        } else {
+            const share = Math.round((rawMap[k] / rawSum) * target);
+            out[k] = share;
+            allocated += share;
+        }
+    });
+    return out;
+}
 
 /* ─────────────────────────────────────────────────────────────────
    LEGISLATIVNÍ A VÝPOČETNÍ KONSTANTY ČR (2026)
@@ -310,20 +364,6 @@ function computeTnProgressionMultiplier(damagePct, maxProgressionPct) {
    ───────────────────────────────────────────────────────────────── */
 const INSURERS = [
     {
-        name: 'Kooperativa', short: 'KOOP',
-        productLine: 'FLEXI životní pojištění / FLEXI Junior / NaPřání',
-        defaultConditions: {
-            contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: false,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
-            tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: true,
-            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
-        },
-        strengths: 'Unikátní garance oceňovacích tabulek (likviduje dle nejvýhodnější verze), progrese TN až 800 %, běžné sporty v základu, špičkové ošetřování dítěte a LTC.',
-        weaknesses: 'Vyšší základní sazba u starších ročníků, přísnější přirážky za vyšší BMI nebo hypertenzi.',
-        notes: 'Vlajkový produkt FLEXI. Lze sjednat samostatně Inv I, II, III, dlouhodobou péči, občanskou odpovědnost i zproštění.'
-    },
-    {
         name: 'Allianz', short: 'ALZ',
         productLine: 'Allianz ŽIVOT / Allianz Plus',
         defaultConditions: {
@@ -336,104 +376,6 @@ const INSURERS = [
         strengths: 'Vynikající krytí závažných onemocnění vč. počátečních stadií, progrese TN až 800 %, daňově uznatelná dlouhodobá péče (LTC), garance nejvyššího plnění.',
         weaknesses: 'Vyšší pojistné u maximálních limitů denního odškodného.',
         notes: 'Allianz ŽIVOT nabízí přehledné balíčky i plně modulární stavbu. Výborné krytí hypoték (klesající PČ).'
-    },
-    {
-        name: 'Generali Česká pojišťovna', short: 'GČP',
-        productLine: 'Můj život 2 / Můj život',
-        defaultConditions: {
-            contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: false,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
-            tnProgression: 1000, invPsychIncluded: true, backPainIncluded: false, garanceTabulek: false,
-            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
-        },
-        strengths: 'Progrese TN až 1000 %, slevy za zdravý životní styl a nekouření až 25–30 %, vysoké limity bez lékařské prohlídky, umí pojistit i některé chronické diagnózy.',
-        weaknesses: 'Přísnější posuzování bolestí zad při PN (vyžaduje objektivní nález CT/MR).',
-        notes: 'Největší pojistitel na trhu. Produkt Můj život 2 kombinuje osobní rizika s možností připojištění odpovědnosti a asistence.'
-    },
-    {
-        name: 'Uniqa', short: 'UNI',
-        productLine: 'Život & Radost',
-        defaultConditions: {
-            contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
-            tnProgression: 1000, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
-            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
-        },
-        strengths: 'Progrese TN až 1000 %, špičkové krytí úvěrů (klesající PČ), ztráta soběstačnosti (LTC) bez čekací doby (doživotní renta od III. st., u dětí jednorázově od II. st.).',
-        weaknesses: 'U některých psychických diagnóz v PN výluky mimo F00–F09 a F20–F29.',
-        notes: 'UNIQA Život & Radost patří k nejčastěji využívaným produktům pro zajištění hypoték a komplexní ochranu rodiny.'
-    },
-    {
-        name: 'NN Životní pojišťovna', short: 'NN',
-        productLine: 'NN Orange Risk / NN Život',
-        defaultConditions: {
-            contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
-            tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
-            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
-        },
-        strengths: 'Špičková dlouhodobá péče (LTC III. a IV. st. s daňovým odpočtem), volba lineárního nebo přirozeného pojistného (levný start pro mladé s hypotékou), 2. lékařský názor.',
-        weaknesses: 'U přirozeného pojistného v pozdějším věku cena roste (vhodné primárně pro klesající PČ).',
-        notes: 'Specialista na čistě rizikové pojištění, závažné nemoci a dlouhodobou péči.'
-    },
-    {
-        name: 'ČSOB Pojišťovna', short: 'ČSOB',
-        productLine: 'Náš život / Forte',
-        defaultConditions: {
-            contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: false,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 3,
-            tnProgression: 600, invPsychIncluded: true, backPainIncluded: false, garanceTabulek: false,
-            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
-        },
-        strengths: 'Dobré krytí psychických onemocnění (deprese, vyhoření) už od I. stupně invalidity, vazba na slevu u hypotéky ČSOB/HB, kvalitní poúrazová asistence.',
-        weaknesses: 'Častější plošné výluky na pohybový aparát při předchozích záznamech v kartě.',
-        notes: 'Moderní produkt Náš život nahradil starší řadu Forte (která se často vyskytuje ve stávajících portfoliích klientů).'
-    },
-    {
-        name: 'MetLife', short: 'MET',
-        productLine: 'OneGuard / Garde 6.0 / OneLife',
-        defaultConditions: {
-            contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
-            tnProgression: 1000, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
-            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
-        },
-        strengths: 'Progrese TN až 1000 %, unikátní připojištění horních končetin, vícenásobné plnění u ZO (až 5× v různých skupinách), velmi rychlá likvidace úrazů, slevy za BMI a nekouření.',
-        weaknesses: 'Přísný vstupní zdravotní underwriting při sjednání.',
-        notes: 'Vlajkový produkt OneGuard nabízí jedny z nejhlubších pojistných podmínek pro úrazy a závažné diagnózy.'
-    },
-    {
-        name: 'Simplea', short: 'SIM',
-        productLine: 'Simplea Životní pojištění 2.0',
-        defaultConditions: {
-            contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
-            tnProgression: 1000, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: true,
-            suicideExclusionYears: 2, occupationCategories: '1–3', paymentFrequency: 'monthly'
-        },
-        strengths: 'Minimum výluk, garance plnění 99 %, srozumitelné pojistné podmínky, progrese TN až 1000 %, posuzování invalidity dle reálného dopadu.',
-        weaknesses: 'Méně drobných bolestných připojištění (zaměřeno primárně na vážná a střední rizika).',
-        notes: 'Moderní produkt zaměřený na ochranu příjmu, invalidity a úvěrů s minimem administrativních kliček.'
-    },
-    {
-        name: 'Komerční pojišťovna', short: 'KB',
-        productLine: 'MojeJistota / Elán / Mutumutu / Vital',
-        defaultConditions: {
-            contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
-            tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
-            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
-        },
-        strengths: 'Silné propojení s hypotékami Komerční banky, v produktu MojeJistota PN zpětně od 1. dne, u Mutumutu cashback až 30 % za zdravý životní styl.',
-        weaknesses: 'Starší bankopojistné smlouvy (Vital) mívají nižší limity na invaliditu.',
-        notes: 'Vystupuje pod značkou KB Pojišťovna (právně Komerční pojišťovna, a.s.).'
     },
     {
         name: 'Česká podnikatelská pojišťovna', short: 'ČPP',
@@ -450,22 +392,36 @@ const INSURERS = [
         notes: 'Produktová řada NEON patří mezi nejprodávanější rodinné pojistky na trhu.'
     },
     {
-        name: 'Pillow pojišťovna', short: 'PIL',
-        productLine: 'Pillow Život / Úraz a nemoc',
+        name: 'ČSOB Pojišťovna', short: 'ČSOB',
+        productLine: 'Náš život / Forte',
         defaultConditions: {
             contractType: 'risk',
-            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
-            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
-            tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: false,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 3,
+            tnProgression: 600, invPsychIncluded: true, backPainIncluded: false, garanceTabulek: false,
             suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
         },
-        strengths: 'Extrémně přehledné a krátké podmínky („polštáře"), férová cena, oddělené oceňování úrazu a nemoci, plně digitální správa.',
-        weaknesses: 'Chybí některá specifická vedlejší připojištění tradičních pojišťoven.',
-        notes: 'Moderní digitální pojišťovna s důrazem na srozumitelnost a absenci skrytých výluk.'
+        strengths: 'Dobré krytí psychických onemocnění (deprese, vyhoření) už od I. stupně invalidity, vazba na slevu u hypotéky ČSOB/HB, kvalitní poúrazová asistence.',
+        weaknesses: 'Častější plošné výluky na pohybový aparát při předchozích záznamech v kartě.',
+        notes: 'Moderní produkt Náš život nahradil starší řadu Forte (která se často vyskytuje ve stávajících portfoliích klientů).'
     },
     {
-        name: 'YOUPLUS', short: 'YOU',
-        productLine: '4U životní pojištění',
+        name: 'Generali Česká pojišťovna', short: 'GČP',
+        productLine: 'Můj život 2 / Můj život',
+        defaultConditions: {
+            contractType: 'risk',
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: false,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
+            tnProgression: 1000, invPsychIncluded: true, backPainIncluded: false, garanceTabulek: false,
+            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
+        },
+        strengths: 'Progrese TN až 1000 %, slevy za zdravý životní styl a nekouření až 25–30 %, vysoké limity bez lékařské prohlídky, umí pojistit i některé chronické diagnózy.',
+        weaknesses: 'Přísnější posuzování bolestí zad při PN (vyžaduje objektivní nález CT/MR).',
+        notes: 'Největší pojistitel na trhu. Produkt Můj život 2 kombinuje osobní rizika s možností připojištění odpovědnosti a asistence.'
+    },
+    {
+        name: 'Komerční pojišťovna', short: 'KB',
+        productLine: 'MojeJistota / Elán / Mutumutu / Vital',
         defaultConditions: {
             contractType: 'risk',
             pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
@@ -473,9 +429,23 @@ const INSURERS = [
             tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
             suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
         },
-        strengths: 'Velmi konkurenceschopná cena u klesajících částek pro zajištění hypotéky (smrt + invalidita I.–III. st.), progrese TN 800 %.',
-        weaknesses: 'Menší pobočková síť (distribuce primárně přes makléře a poradce).',
-        notes: 'Oblíbená volba pro cenově efektivní krytí velkých rizik (smrt, invalidita, ZO).'
+        strengths: 'Silné propojení s hypotékami Komerční banky, v produktu MojeJistota PN zpětně od 1. dne, u Mutumutu cashback až 30 % za zdravý životní styl.',
+        weaknesses: 'Starší bankopojistné smlouvy (Vital) mívají nižší limity na invaliditu.',
+        notes: 'Vystupuje pod značkou KB Pojišťovna (právně Komerční pojišťovna, a.s.).'
+    },
+    {
+        name: 'Kooperativa', short: 'KOOP',
+        productLine: 'FLEXI životní pojištění / FLEXI Junior / NaPřání',
+        defaultConditions: {
+            contractType: 'risk',
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: false,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
+            tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: true,
+            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
+        },
+        strengths: 'Unikátní garance oceňovacích tabulek (likviduje dle nejvýhodnější verze), progrese TN až 800 %, běžné sporty v základu, špičkové ošetřování dítěte a LTC.',
+        weaknesses: 'Vyšší základní sazba u starších ročníků, přísnější přirážky za vyšší BMI nebo hypertenzi.',
+        notes: 'Vlajkový produkt FLEXI. Lze sjednat samostatně Inv I, II, III, dlouhodobou péči, občanskou odpovědnost i zproštění.'
     },
     {
         name: 'Maxima / Direct', short: 'MAX',
@@ -490,8 +460,92 @@ const INSURERS = [
         strengths: 'Jednoduché sjednání vybraných úrazových a rizikových složek.',
         weaknesses: 'Užší rozsah krytí u komplexních diagnóz oproti velkým životním pojišťovnám.',
         notes: 'Doplňkové produkty na českém pojistném trhu.'
+    },
+    {
+        name: 'MetLife', short: 'MET',
+        productLine: 'OneGuard / Garde 6.0 / OneLife',
+        defaultConditions: {
+            contractType: 'risk',
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
+            tnProgression: 1000, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
+            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
+        },
+        strengths: 'Progrese TN až 1000 %, unikátní připojištění horních končetin, vícenásobné plnění u ZO (až 5× v různých skupinách), velmi rychlá likvidace úrazů, slevy za BMI a nekouření.',
+        weaknesses: 'Přísný vstupní zdravotní underwriting při sjednání.',
+        notes: 'Vlajkový produkt OneGuard nabízí jedny z nejhlubších pojistných podmínek pro úrazy a závažné diagnózy.'
+    },
+    {
+        name: 'NN Životní pojišťovna', short: 'NN',
+        productLine: 'NN Orange Risk / NN Život',
+        defaultConditions: {
+            contractType: 'risk',
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
+            tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
+            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
+        },
+        strengths: 'Špičková dlouhodobá péče (LTC III. a IV. st. s daňovým odpočtem), volba lineárního nebo přirozeného pojistného (levný start pro mladé s hypotékou), 2. lékařský názor.',
+        weaknesses: 'U přirozeného pojistného v pozdějším věku cena roste (vhodné primárně pro klesající PČ).',
+        notes: 'Specialista na čistě rizikové pojištění, závažné nemoci a dlouhodobou péči.'
+    },
+    {
+        name: 'Pillow pojišťovna', short: 'PIL',
+        productLine: 'Pillow Život / Úraz a nemoc',
+        defaultConditions: {
+            contractType: 'risk',
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
+            tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
+            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
+        },
+        strengths: 'Extrémně přehledné a krátké podmínky („polštáře"), férová cena, oddělené oceňování úrazu a nemoci, plně digitální správa.',
+        weaknesses: 'Chybí některá specifická vedlejší připojištění tradičních pojišťoven.',
+        notes: 'Moderní digitální pojišťovna s důrazem na srozumitelnost a absenci skrytých výluk.'
+    },
+    {
+        name: 'Simplea', short: 'SIM',
+        productLine: 'Simplea Životní pojištění 2.0',
+        defaultConditions: {
+            contractType: 'risk',
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
+            tnProgression: 1000, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: true,
+            suicideExclusionYears: 2, occupationCategories: '1–3', paymentFrequency: 'monthly'
+        },
+        strengths: 'Minimum výluk, garance plnění 99 %, srozumitelné pojistné podmínky, progrese TN až 1000 %, posuzování invalidity dle reálného dopadu.',
+        weaknesses: 'Méně drobných bolestných připojištění (zaměřeno primárně na vážná a střední rizika).',
+        notes: 'Moderní produkt zaměřený na ochranu příjmu, invalidity a úvěrů s minimem administrativních kliček.'
+    },
+    {
+        name: 'Uniqa', short: 'UNI',
+        productLine: 'Život & Radost',
+        defaultConditions: {
+            contractType: 'risk',
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
+            tnProgression: 1000, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
+            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
+        },
+        strengths: 'Progrese TN až 1000 %, špičkové krytí úvěrů (klesající PČ), ztráta soběstačnosti (LTC) bez čekací doby (doživotní renta od III. st., u dětí jednorázově od II. st.).',
+        weaknesses: 'U některých psychických diagnóz v PN výluky mimo F00–F09 a F20–F29.',
+        notes: 'UNIQA Život & Radost patří k nejčastěji využívaným produktům pro zajištění hypoték a komplexní ochranu rodiny.'
+    },
+    {
+        name: 'YOUPLUS', short: 'YOU',
+        productLine: '4U životní pojištění',
+        defaultConditions: {
+            contractType: 'risk',
+            pnWaitingDays: 29, pnFromDay: 29, pnRetroactive: true,
+            hospWaitingDays: 0, criticalIllnessWaitingMonths: 2,
+            tnProgression: 800, invPsychIncluded: true, backPainIncluded: true, garanceTabulek: false,
+            suicideExclusionYears: 2, occupationCategories: '1–4', paymentFrequency: 'monthly'
+        },
+        strengths: 'Velmi konkurenceschopná cena u klesajících částek pro zajištění hypotéky (smrt + invalidita I.–III. st.), progrese TN 800 %.',
+        weaknesses: 'Menší pobočková síť (distribuce primárně přes makléře a poradce).',
+        notes: 'Oblíbená volba pro cenově efektivní krytí velkých rizik (smrt, invalidita, ZO).'
     }
-];
+].sort((a, b) => new Intl.Collator('cs', { sensitivity: 'base' }).compare(a.name, b.name));
 
 const INSURER_NAMES = INSURERS.map(i => i.name);
 
@@ -608,41 +662,49 @@ const SAMPLE_DATA = {
         { id: 's1', clientId: 'c1', insurer: 'ČSOB Pojišťovna', contractNo: '1317491203', start: 2019, end: 2053, premium: 777,
           actionStatus: 'keep', actionReason: 'PONECHAT – sjednáno před r. 2021 (srdeční potíže), kryje ZO 500 000 Kč bez výluky na srdce.',
           items: { smrt: 10000, zavOn: 500000 },
+          itemPremiums: { smrt: 27, zavOn: 750 },
           conditions: { contractType: 'risk', pnFromDay: 29, pnRetroactive: false, tnProgression: 400, invPsychIncluded: true, backPainIncluded: false, paymentFrequency: 'monthly' },
           note: 'Hlavní smlouva s připojištěním ZO před r. 2021' },
         { id: 's2', clientId: 'c1', insurer: 'ČSOB Pojišťovna', contractNo: '1307186251', start: 2015, end: 2058, premium: 409,
           actionStatus: 'cancel', actionReason: 'VYPOVĚDĚT po přijetí nové smlouvy Uniqa – kryje pouze úrazovou smrt a drobné denní dávky, chybí invalidita i smrt z nemoci.',
           items: { smrt: 10000, smrtUraz: 500000, uraz: 300, hosp: 500 },
+          itemPremiums: { smrt: 25, smrtUraz: 95, uraz: 169, hosp: 120 },
           conditions: { contractType: 'risk', pnFromDay: 29, pnRetroactive: false, tnProgression: 400, paymentFrequency: 'monthly' },
           note: 'Starší úrazově orientovaná smlouva' },
         { id: 's3', clientId: 'c1', insurer: 'ČSOB Pojišťovna', contractNo: '3117104', start: 2014, end: 2045, premium: 100,
           actionStatus: 'keep', actionReason: 'PONECHAT – nízké pojistné 100 Kč/měs, kryje základní smrt 100 000 Kč bez čekacích dob.',
           items: { smrt: 100000 },
+          itemPremiums: { smrt: 100 },
           conditions: { contractType: 'capital', pnFromDay: 29, pnRetroactive: false, tnProgression: 100, paymentFrequency: 'monthly' },
           note: 'Malá doplňková pojistka' },
         { id: 's4', clientId: 'c1', insurer: 'ČSOB Pojišťovna', contractNo: '1105984739', start: 2013, end: 2058, premium: 156,
           actionStatus: 'cancel', actionReason: 'VYPOVĚDĚT po přijetí nové smlouvy – duplicitní drobné úrazové krytí s nízkým limitem TN 200 000 Kč.',
           items: { smrtUraz: 200000, tnUraz: 200000, uraz: 100 },
+          itemPremiums: { smrtUraz: 38, tnUraz: 58, uraz: 60 },
           conditions: { contractType: 'accident', pnFromDay: 29, pnRetroactive: false, tnProgression: 400, paymentFrequency: 'monthly' },
           note: 'Starší úrazová pojistka' },
         { id: 's5', clientId: 'c3', insurer: 'ČSOB Pojišťovna', contractNo: '1317491203-D1', start: 2019, end: 2053, premium: 0,
           actionStatus: 'consolidate', actionReason: 'SLOUČIT / PŘEVÉST – dětské krytí převádíme do nové rodinné smlouvy s doplněním dětské invalidity a ošetřování.',
           items: { zavOn: 500000, tnUraz: 1000000, uraz: 500, hosp: 500 },
+          itemPremiums: { zavOn: 0, tnUraz: 0, uraz: 0, hosp: 0 },
           conditions: { contractType: 'risk', tnProgression: 500, paymentFrequency: 'monthly' },
           note: 'Připojištění syna Viléma u smlouvy otce' },
         { id: 's6', clientId: 'c4', insurer: 'ČSOB Pojišťovna', contractNo: '1317491203-D2', start: 2020, end: 2053, premium: 777,
           actionStatus: 'keep', actionReason: 'PONECHAT – syn Tobiáš má zde kvalitní dětské krytí (ZO 500k, TN 1M, DOÚ 500 Kč, Hosp 500 Kč).',
           items: { zavOn: 500000, tnUraz: 1000000, uraz: 500, hosp: 500 },
+          itemPremiums: { zavOn: 185, tnUraz: 210, uraz: 242, hosp: 140 },
           conditions: { contractType: 'risk', tnProgression: 500, paymentFrequency: 'monthly' },
           note: 'Připojištění syna Tobiáše' },
         { id: 's7', clientId: 'c2', insurer: 'ČSOB Pojišťovna', contractNo: '1307186262', start: 2015, end: 2060, premium: 407,
           actionStatus: 'cancel', actionReason: 'VYPOVĚDĚT po přijetí nové smlouvy – neřeší invaliditu ani zajištění rodiny při smrti z nemoci.',
           items: { smrt: 10000, smrtUraz: 500000, uraz: 300, hosp: 500 },
+          itemPremiums: { smrt: 24, smrtUraz: 95, uraz: 168, hosp: 120 },
           conditions: { contractType: 'risk', tnProgression: 400, paymentFrequency: 'monthly' },
           note: 'Úrazová smlouva paní Martiny' },
         { id: 's8', clientId: 'c2', insurer: 'Kooperativa', contractNo: '1420482462', start: 2009, end: 2050, premium: 500,
           actionStatus: 'cancel', actionReason: 'VYPOVĚDĚT po přijetí nové smlouvy – zastaralá smlouva z r. 2009 s extrémně nízkou invaliditou (24 000 Kč) a ZO (50 000 Kč).',
           items: { smrt: 200000, invalidita: 24000, zavOn: 50000, tnUraz: 200000, uraz: 100, hosp: 200 },
+          itemPremiums: { smrt: 145, invalidita: 35, zavOn: 85, tnUraz: 75, uraz: 85, hosp: 75 },
           conditions: { contractType: 'invest', tnProgression: 400, paymentFrequency: 'monthly' },
           note: 'Starší smlouva Kooperativa z r. 2009' }
     ],
@@ -650,31 +712,37 @@ const SAMPLE_DATA = {
         { id: 'n1', clientId: 'c1', insurer: 'ČSOB Pojišťovna', contractNo: '1317491203', start: 2019, end: 2053, premium: 777,
           proposalStatus: 'kept', actionReason: 'ZACHOVANÁ SMLOUVA – držíme kvůli bezvýlukovému krytí ZO 500 000 Kč sjednanému před rokem 2021 (kardio anamnéza).',
           items: { smrt: 10000, zavOn: 500000 },
+          itemPremiums: { smrt: 27, zavOn: 750 },
           conditions: { contractType: 'risk', pnFromDay: 29, pnRetroactive: false, tnProgression: 400, invPsychIncluded: true, paymentFrequency: 'monthly' },
           note: 'Zachováno – problémy se srdcem 2021' },
         { id: 'n2', clientId: 'c1', insurer: 'ČSOB Pojišťovna', contractNo: '3117104', start: 2014, end: 2045, premium: 100,
           proposalStatus: 'kept', actionReason: 'ZACHOVANÁ SMLOUVA – doplňková částka na smrt 100 000 Kč za 100 Kč/měs.',
           items: { smrt: 100000 },
+          itemPremiums: { smrt: 100 },
           conditions: { contractType: 'capital', tnProgression: 100, paymentFrequency: 'monthly' },
           note: 'Zachováno beze změny' },
         { id: 'n3', clientId: 'c1', insurer: 'Uniqa', contractNo: 'NÁVRH-UNI-001', start: 2026, end: 2056, premium: 1890,
           proposalStatus: 'new', actionReason: 'NOVÁ HLAVNÍ SMLOUVA (Život & Radost) – plně zajišťuje hypotéku a rodinné úvěry (6 mil. Kč), invaliditu I.–III. st., TN s progresí 1000 % a dlouhodobou PN.',
           items: { smrt: 1000000, smrtKles: 5000000, smrtUraz: 2000000, invalidita: 3000000, inv2: 3000000, inv1: 1500000, tnUraz: 1000000, tnUraz10: 1000000, uraz: 200, urazVelky: 400, hosp: 500, pn61: 500, chir: 30000 },
+          itemPremiums: { smrt: 145, smrtKles: 245, smrtUraz: 95, invalidita: 365, inv2: 260, inv1: 165, tnUraz: 115, tnUraz10: 68, uraz: 84, urazVelky: 64, hosp: 92, pn61: 128, chir: 64 },
           conditions: { contractType: 'risk', pnFromDay: 61, pnRetroactive: true, tnProgression: 1000, invPsychIncluded: true, backPainIncluded: true, paymentFrequency: 'monthly', employerContribution: 500 },
           note: 'Nová hlavní pojistka – krytí nového i stávajícího úvěru + ochrana příjmu' },
         { id: 'n4', clientId: 'c3', insurer: 'Uniqa', contractNo: 'NÁVRH-UNI-001 (dítě)', start: 2026, end: 2044, premium: 380,
           proposalStatus: 'new', actionReason: 'NOVÉ PŘIPOJIŠTĚNÍ SYNA VILÉMA – doplněna dětská invalidita / soběstačnost 1 000 000 Kč a ošetřování dítěte 400 Kč/den.',
           items: { invalidita: 1000000, trvaleNasledkyNemoc: 1000000, zavOn: 500000, tnUraz: 1000000, uraz: 500, hosp: 500, osetrovani: 400 },
+          itemPremiums: { invalidita: 45, trvaleNasledkyNemoc: 42, zavOn: 58, tnUraz: 65, uraz: 78, hosp: 44, osetrovani: 48 },
           conditions: { contractType: 'risk', tnProgression: 1000, paymentFrequency: 'monthly' },
           note: 'Komplexní dětský program v rámci rodinné smlouvy Uniqa' },
         { id: 'n5', clientId: 'c2', insurer: 'Uniqa', contractNo: 'NÁVRH-UNI-002', start: 2026, end: 2057, premium: 1269,
           proposalStatus: 'new', actionReason: 'NOVÁ SMLOUVA PRO PANÍ MARTINU – zajištění smrti (3,2 mil. Kč), invalidity I.–III. st. (až 3 mil. Kč), závažných onemocnění (500 tis. Kč) a ošetřování dětí.',
           items: { smrt: 700000, smrtKles: 2500000, invalidita: 3000000, inv2: 3000000, inv1: 1000000, zavOn: 500000, tnUraz: 500000, tnUraz10: 1000000, uraz: 200, urazVelky: 300, hosp: 500, osetrovani: 300, chir: 30000 },
+          itemPremiums: { smrt: 85, smrtKles: 118, invalidita: 290, inv2: 210, inv1: 98, zavOn: 155, tnUraz: 55, tnUraz10: 52, uraz: 56, urazVelky: 35, hosp: 48, osetrovani: 32, chir: 35 },
           conditions: { contractType: 'risk', pnFromDay: 29, pnRetroactive: true, tnProgression: 1000, invPsychIncluded: true, backPainIncluded: true, paymentFrequency: 'monthly' },
           note: 'Nová komplexní pojistka pro paní Martinu' },
         { id: 'n6', clientId: 'c4', insurer: 'ČSOB Pojišťovna', contractNo: '1317491203-D2', start: 2020, end: 2053, premium: 777,
           proposalStatus: 'kept', actionReason: 'ZACHOVÁNO – stávající dětské připojištění syna Tobiáše ponecháno v platnosti.',
           items: { zavOn: 500000, tnUraz: 1000000, uraz: 500, hosp: 500 },
+          itemPremiums: { zavOn: 185, tnUraz: 210, uraz: 242, hosp: 140 },
           conditions: { contractType: 'risk', tnProgression: 500, paymentFrequency: 'monthly' },
           note: 'Zachované dětské připojištění Tobiáše' }
     ],
@@ -705,12 +773,108 @@ const SAMPLE_DATA = {
     modelId: 'MOD-2026-01'
 };
 
+/* ─────────────────────────────────────────────────────────────────
+   TARIFNÍ PRŮVODCE A KÓDOVNÍK ČESKÝCH POJIŠŤOVEN
+   Usnadňuje zadávání a jednoznačné přiřazení položek bez hádání.
+   ───────────────────────────────────────────────────────────────── */
+const INSURER_TARIFF_GUIDES = {
+    'Generali Česká pojišťovna': {
+        smrt: { code: 'RZ20R / RS201', hint: 'Pojištění pro případ smrti (konstantní PČ)' },
+        smrtKles: { code: 'RK20R / RK201', hint: 'Smrt s ročně klesající PČ (k úvěru)' },
+        smrtUraz: { code: 'SU20', hint: 'Smrt úrazem (2x při dopravní nehodě)' },
+        invKles: { code: 'IK320 / IK32B', hint: 'Invalidita III. st. klesající PČ (Fixace 0 % / 50 %)' },
+        inv2Kles: { code: 'IK220', hint: 'Invalidita II. st. klesající PČ (Fixace 50 %)' },
+        zavOnKles: { code: 'VZK20', hint: 'Připojištění velmi závažných onemocnění klesající' },
+        tnUraz: { code: 'TN820', hint: 'TN úrazu PROG10 od 0.5 %' },
+        tnUraz10: { code: 'TN100', hint: 'TN úrazu PROG10 od 10 % včetně ztrátových poranění' },
+        horniKoncetiny: { code: 'RPHK0', hint: 'Připojištění horních končetin - plný rozsah' },
+        uraz: { code: 'DOZ20', hint: 'Denní odškodné od 10. dne zpětně' },
+        urazVelky: { code: 'DO280', hint: 'Denní odškodné od 29. dne nezpětně' },
+        pn28: { code: 'Z29Z0', hint: 'Denní dávka PN od 29. dne zpětně (Kč/den)' },
+        pn61: { code: 'MZ6Z0', hint: 'Měsíční dávka PN po 61 dnech zpětně (Kč/měs)' },
+        hosp: { code: 'NDDB0', hint: 'Nemocniční denní dávka od 1. dne' },
+        chir: { code: 'CHI20', hint: 'Chirurgický zákrok' },
+        ztrataRidicskeho: { code: 'RIDI0', hint: 'Ztráta řidičského oprávnění (měs. renta)' },
+        dozitiInvestice: { code: 'RZP20 / BON20', hint: 'Smrt nebo dožití (IŽP podílové jednotky) / Věrnostní bonus' },
+        _comboMortgage: { code: 'PR201 / PR02B', hint: 'První z rizik smrti nebo invalidity III+II+I s klesající PČ' }
+    },
+    'Kooperativa': {
+        smrt: { code: 'SMR / ZS', hint: 'Základní / doplňkové pojištění smrti s konstantní PČ' },
+        smrtKles: { code: 'SMK / HYS', hint: 'Smrt s klesající PČ (k hypotečnímu úvěru)' },
+        smrtUraz: { code: 'SMU', hint: 'Smrt následkem úrazu' },
+        invalidita: { code: 'INV3 / ID3', hint: 'Invalidita III. stupně (samostatná nebo balíček)' },
+        inv2: { code: 'INV2 / ID2', hint: 'Invalidita II. stupně' },
+        inv1: { code: 'INV1 / ID1', hint: 'Invalidita I. stupně' },
+        invKles: { code: 'INVK / HYI', hint: 'Invalidita s klesající PČ (hypoteční balíček)' },
+        zavOn: { code: 'VZO / ZON', hint: 'Velmi závažná onemocnění (až 60 diagnóz)' },
+        zavOnKles: { code: 'VZOK', hint: 'VZO s klesající PČ k úvěru' },
+        tnUraz: { code: 'TNU / TN8', hint: 'Trvalé následky úrazu s progresí 800 % od 0,5 %' },
+        tnUraz10: { code: 'TNU10', hint: 'TN úrazu od 10 % tělesného poškození' },
+        uraz: { code: 'DO-U / DOU', hint: 'Denní odškodné za dobu léčení úrazu' },
+        urazVelky: { code: 'DO-UN / VÚ', hint: 'Denní odškodné pro vážnější úrazy (od 29. dne)' },
+        pn28: { code: 'PN29 / PN-Z', hint: 'Pracovní neschopnost od 29. dne (s volbou zpětně)' },
+        pn15: { code: 'PN15', hint: 'Pracovní neschopnost od 15. dne' },
+        hosp: { code: 'HOS', hint: 'Hospitalizace nemoc i úraz' },
+        zprosteni: { code: 'ZPR', hint: 'Zproštění od placení pojistného při invaliditě' }
+    },
+    'Allianz': {
+        smrt: { code: 'Modul ŽIVOT', hint: 'Smrt z jakýchkoliv příčin (konstantní / klesající)' },
+        invalidita: { code: 'Modul INV', hint: 'Invalidita I., II., III. st. (včetně psychiky a zad)' },
+        invKles: { code: 'Modul INV Kles.', hint: 'Klesající invalidita pro hypoteční zajištění' },
+        zavOn: { code: 'Modul PRO ŽENY/MUŽE', hint: 'Závažná onemocnění včetně in-situ stadií' },
+        tnUraz: { code: 'Modul ÚRAZ (TN800)', hint: 'Garantované nejvyšší plnění na trhu s progresí 800 %' },
+        pn28: { code: 'Modul PŘÍJEM (PN29)', hint: 'Karenční doba 28 dní se zpětným plněním od 1. dne' },
+        hosp: { code: 'HOSPITALIZACE', hint: 'Denní dávka při pobytu v nemocnici' }
+    },
+    'ČSOB Pojišťovna': {
+        smrt: { code: 'SMR / SK', hint: 'Smrt s konstantní nebo klesající pojistnou částkou' },
+        invalidita: { code: 'INV 1-3', hint: 'Invalidita I., II., III. stupně' },
+        invKles: { code: 'INVK', hint: 'Invalidita klesající k hypotečnímu úvěru' },
+        zavOn: { code: 'VZO Komplex', hint: 'Vážná onemocnění (komplexní varianta)' },
+        tnUraz: { code: 'TNÚ PROG 500', hint: 'Trvalé následky úrazu s progresí 500 %' },
+        uraz: { code: 'DOÚ', hint: 'Denní odškodné za dobu nezbytného léčení úrazu' },
+        pn28: { code: 'PN 29 zp.', hint: 'Pracovní neschopnost s cashbackem za bezeškodní průběh' }
+    },
+    'Uniqa': {
+        smrt: { code: 'TARIF S / SK', hint: 'Smrt z jakýchkoli příčin konstantní nebo klesající' },
+        invalidita: { code: 'TARIF I1-I3', hint: 'Invalidita I., II. a III. stupně' },
+        invKles: { code: 'TARIF IK', hint: 'Invalidita s klesající pojistnou částkou k úvěru' },
+        zavOn: { code: 'TARIF ZO', hint: 'Závažná onemocnění s vícenásobným plněním' },
+        tnUraz: { code: 'TARIF TN 1000', hint: 'Trvalé následky úrazu s progresí až 1000 %' },
+        uraz: { code: 'TARIF DO', hint: 'Denní odškodné za nezbytné léčení úrazu' },
+        pn28: { code: 'TARIF PN 29', hint: 'Pracovní neschopnost od 29. dne' }
+    },
+    'NN Životní pojišťovna': {
+        smrt: { code: 'SMRT HLAVNÍ / KLES', hint: 'Krytí pro rodinu a závazky' },
+        invalidita: { code: 'INV PČ / RENTA', hint: 'Invalidita formou jednorázové částky i renty' },
+        zavOn: { code: 'ZO AŽ 300 %', hint: 'Závažná onemocnění s opakovaným plněním' },
+        tnUraz: { code: 'TN PROG 800', hint: 'Trvalé následky úrazu s osminásobnou progresí' },
+        pn28: { code: 'PN OD 29. DNE', hint: 'Pracovní neschopnost' }
+    },
+    'Simplea': {
+        smrt: { code: 'SMRT KONST / KLES', hint: 'Čisté rizikové krytí bez zbytečných výluk' },
+        invalidita: { code: 'INV I+II+III', hint: 'Komplexní invalidita z nemoci i úrazu' },
+        zavOn: { code: 'ZÁVAŽNÉ NEMOCI', hint: 'Široký seznam nemocí s garancí plnění v 99 % případů' },
+        tnUraz: { code: 'TN ÚRAZU', hint: 'Trvalé následky od 0,1 % tělesného poškození' },
+        pn28: { code: 'DLOUHODOBÁ PN', hint: 'Výpadek příjmu od 29. dne' }
+    },
+    'MetLife': {
+        smrt: { code: 'ONEGUARD SMRT', hint: 'Smrt s konstantní nebo anuitně klesající PČ' },
+        invalidita: { code: 'ONEGUARD INV', hint: 'Invalidita I., II., III. st. i měsíční renta' },
+        zavOn: { code: 'FAIRLIFE ZO', hint: 'Závažná onemocnění s včasnou diagnózou' },
+        tnUraz: { code: 'TN PROG 1000', hint: 'Trvalé následky úrazu až do 10násobku' }
+    }
+};
+
 /* Vystavíme do window pro insurance-app.js i tisk.html */
 window.INSURANCE_DATA = {
     CATEGORY_GROUPS,
     GROUP_BY_KEY,
     CATEGORIES: INSURANCE_CATEGORIES,
     CATEGORY_BY_KEY,
+    TARIFF_RATES,
+    INSURER_TARIFF_GUIDES,
+    estimateItemPremiums,
     STATUTORY_2026,
     SICKLEAVE_BRACKETS,
     SICKLEAVE_CAP,
